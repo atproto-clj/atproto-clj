@@ -194,6 +194,7 @@
 
 (defn -main [& args]
   (let [env (read-env (first args))]
+    (db/up!)
     (run-jetty (handler env)
                {:port (:port env)
                 :join? true})))

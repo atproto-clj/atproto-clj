@@ -11,10 +11,9 @@
   channel will be returned.)"
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
-            [atproto.interceptor :as i]
+            [atproto.runtime.interceptor :as i]
             [atproto.xrpc :as xrpc]
             [atproto.session :as session]
-            [atproto.lexicon :as lexicon]
             [atproto.session.unauthenticated :as unauthenticated-session]
             [atproto.session.credentials :as credentials-session]
             [atproto.client.config :as-alias config]))
@@ -37,14 +36,12 @@
   Supported keys:
   :session     (optional) The unauthenticated or authenticated session to use.
   :credentials (optional) Convenience to create a Credentials-based session (if no :session).
-  :service     (optional) Convenience to create an Unauthenticated session (if no :session).
-  :validate?   (optional) Whether to validate the arguments to procedure and query."
-  [{:keys [session credentials service validate?] :as config} & {:as opts}]
-  (let [client {::validate? validate?}
-        [cb val] (i/platform-async opts)]
+  :service     (optional) Convenience to create an Unauthenticated session (if no :session)."
+  [{:keys [session credentials service] :as config} & {:as opts}]
+  (let [[cb val] (i/platform-async opts)]
     (cond
       session
-      (cb (assoc client ::session session))
+      (cb {::session session})
 
       credentials
       (credentials-session/create credentials
@@ -52,14 +49,14 @@
                                   (fn [{:keys [error] :as session}]
                                     (if error
                                       (cb session)
-                                      (cb (assoc client ::session session)))))
+                                      (cb {::session session}))))
       service
       (unauthenticated-session/create service
                                       :callback
                                       (fn [{:keys [error] :as session}]
                                         (if error
                                           (cb session)
-                                          (cb (assoc client ::session session))))))
+                                          (cb {::session session})))))
     val))
 
 (defn did
@@ -70,20 +67,10 @@
 
 (defn procedure
   "Issue a procedure call with the given arguments."
-  [client args & {:as opts}]
-  (let [[cb val] (i/platform-async opts)]
-    (if (and (::validate? client)
-             (not (lexicon/valid-call? args)))
-      (cb (lexicon/invalid-call args))
-      (xrpc/procedure (::session client) args :callback cb))
-    val))
+  [{:keys [::session]} args & {:as opts}]
+  (xrpc/procedure session args opts))
 
 (defn query
   "Issue a query with the igven arguments."
-  [client args & {:as opts}]
-  (let [[cb val] (i/platform-async opts)]
-    (if (and (::validate? client)
-             (not (lexicon/valid-call? args)))
-      (cb (lexicon/invalid-call args))
-      (xrpc/query (::session client) args :callback cb))
-    val))
+  [{:keys [::session]} args & {:as opts}]
+  (xrpc/query session args opts))

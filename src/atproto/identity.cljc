@@ -2,7 +2,7 @@
   "Cross platform identity resolver for atproto."
   (:refer-clojure :exclude [resolve])
   (:require [clojure.string :as str]
-            [atproto.interceptor :as i]
+            [atproto.runtime.interceptor :as i]
             [atproto.did :as did]
             [atproto.handle :as handle]))
 

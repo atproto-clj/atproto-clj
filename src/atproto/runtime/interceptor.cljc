@@ -1,4 +1,4 @@
-(ns atproto.interceptor
+(ns atproto.runtime.interceptor
   "Simplified, callback-based implementation of the interceptor pattern.
 
   Interceptors are maps with ::enter and/or ::leave keys, with _interceptor
@@ -43,6 +43,8 @@
   the error type, and a `:message` key with a human-readable error message."
   (:refer-clojure :exclude [identity])
   (:require #?@(:cljd [] :default [[clojure.core.async :as a]])))
+
+#?(:clj (set! *warn-on-reflection* true))
 
 (declare continue)
 

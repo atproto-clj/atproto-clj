@@ -10,18 +10,18 @@
 
 (def create-tables
   [
-   "create table status (
+   "create table if not exists status (
       uri varchar primary key,
       author_did varchar,
       status varchar,
       created_at varchar,
       indexed_at varchar)"
 
-   "create table auth_session (
+   "create table if not exists auth_session (
       key varchar primary key,
       session varchar)"
 
-   "create table auth_state (
+   "create table if not exists auth_state (
       key varchar primary key,
       state varchar)"])
 

@@ -1,8 +1,8 @@
 (ns atproto.session.unauthenticated
   "Unauthenticated session for public service/ops."
   (:require [clojure.spec.alpha :as s]
-            [atproto.interceptor :as i]
-            [atproto.http :as http]
+            [atproto.runtime.interceptor :as i]
+            [atproto.runtime.http :as http]
             [atproto.did :as did]
             [atproto.handle :as handle]
             [atproto.identity :as identity]

@@ -1,7 +1,7 @@
 (ns atproto.session.credentials
   "Authenticated session with an identifier and password."
   (:require [clojure.spec.alpha :as s]
-            [atproto.interceptor :as i]
+            [atproto.runtime.interceptor :as i]
             [atproto.did :as did]
             [atproto.handle :as handle]
             [atproto.xrpc :as xrpc]

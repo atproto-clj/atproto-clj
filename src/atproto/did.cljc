@@ -9,10 +9,9 @@
   (:refer-clojure :exclude [resolve])
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
-            [atproto.interceptor :as i]
-            [atproto.http :as http]
-            [atproto.json :as json]
-            [atproto.did :as-alias did]))
+            [atproto.runtime.interceptor :as i]
+            [atproto.runtime.http :as http]
+            [atproto.runtime.json :as json]))
 
 ;; Helpers
 
@@ -24,7 +23,7 @@
 
 ;; Parsing & validation
 
-(s/def ::did/scheme #{"did"})
+(s/def ::scheme #{"did"})
 
 (defn method?
   "Whether the string is a well-formed method name.
@@ -34,7 +33,7 @@
   (and (not (str/blank? s))
        (every? method-char? s)))
 
-(s/def ::did/method (s/and string? method?))
+(s/def ::method (s/and string? method?))
 
 (defn msid?
   "Whether the string is a well-formed method-specific identifier.
@@ -69,7 +68,7 @@
       ;; Otherwise invalid
       :else false)))
 
-(s/def ::did/msid (s/and string? msid?))
+(s/def ::msid (s/and string? msid?))
 
 (defn parse
   "Parse the input string into a map with :scheme, :method, and :msid."
@@ -83,7 +82,7 @@
 (s/def ::did
   (s/and string?
          (s/conformer #(or (parse %) ::s/invalid))
-         (s/keys :req-un [::did/scheme ::did/method ::did/msid])))
+         (s/keys :req-un [::scheme ::method ::msid])))
 
 (defmulti method-spec
   "Method-specific validation of the atproto DID."

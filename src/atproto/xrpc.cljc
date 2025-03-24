@@ -1,9 +1,9 @@
 (ns atproto.xrpc
   "Cross-platform XRPC client for AT Proto."
   (:require [clojure.spec.alpha :as s]
-            [atproto.http :as http]
-            [atproto.json :as json]
-            [atproto.interceptor :as i]
+            [atproto.runtime.http :as http]
+            [atproto.runtime.json :as json]
+            [atproto.runtime.interceptor :as i]
             [atproto.session :as session]))
 
 ;; TODO:

@@ -5,10 +5,10 @@
   (:refer-clojure :exclude [resolve])
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
-            [atproto.interceptor :as i]
-            [atproto.dns :as dns]
-            [atproto.json :as json]
-            [atproto.http :as http]))
+            [atproto.runtime.interceptor :as i]
+            [atproto.runtime.dns :as dns]
+            [atproto.runtime.json :as json]
+            [atproto.runtime.http :as http]))
 
 ;; From https://github.com/bluesky-social/atproto/blob/main/packages/syntax/src/handle.ts
 (def regex

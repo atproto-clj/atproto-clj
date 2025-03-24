@@ -1,10 +1,10 @@
 (ns atproto.session.oauth.client.dpop
   "DPoP implementation for the OAuth client."
   (:require [clojure.string :as str]
-            [atproto.interceptor :as i]
-            [atproto.jwt :as jwt]
-            [atproto.http :as http]
-            [atproto.crypto :as crypto]))
+            [atproto.runtime.interceptor :as i]
+            [atproto.runtime.jwt :as jwt]
+            [atproto.runtime.http :as http]
+            [atproto.runtime.crypto :as crypto]))
 
 ;; todo: where to store this? 1 per origin?
 ;; host -> nonce

@@ -1,8 +1,10 @@
-(ns atproto.json
+(ns atproto.runtime.json
   "Cross platform JSON parser/serializer."
   (:require [clojure.string :as str]
-            [atproto.interceptor :as i]
+            [atproto.runtime.interceptor :as i]
             #?(:clj [charred.api :as json])))
+
+#?(:clj (set! *warn-on-reflection* true))
 
 (defn- json-content-type?
   "Test if a request or response should be interpreted as json"
