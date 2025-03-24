@@ -2,8 +2,7 @@
   "Authenticated session with an identifier and password."
   (:require [clojure.spec.alpha :as s]
             [atproto.runtime.interceptor :as i]
-            [atproto.did :as did]
-            [atproto.handle :as handle]
+            [atproto.identity :as identity]
             [atproto.xrpc :as xrpc]
             [atproto.session :as session]
             [atproto.session.unauthenticated :as unauthenticated]))
@@ -13,25 +12,16 @@
 ;; - do we need to copy over some data from the previous session when refreshing?
 ;; - auto-refresh
 
-(s/def ::credentials
-  (s/keys :req-un [::identifier
-                   ::password]))
-
-(s/def ::identifier (s/or :handle ::handle/handle
-                          :did    ::did/at-did))
-
-(s/def ::password string?)
-
 (declare refresh-session auth-interceptor)
 
-(defn- handle-xrpc-response
+(defn- auth-session
   "Build a session from the PDS response."
-  [{:keys [did handle didDoc] :as resp} cb]
+  [{:keys [did didDoc handle] :as resp} cb]
   (cb (with-meta
-        (cond-> #::session{:service (did/pds didDoc)
+        (cond-> #::session{:service (identity/did-doc-pds didDoc)
+                           :did did
                            :authenticated? true
                            :refreshable? true}
-          did (assoc ::session/did did)
           handle (assoc ::session/handle handle))
         {`session/auth-interceptor #(auth-interceptor % (select-keys resp [:accessJwt :refreshJwt]))
          `session/refresh-session refresh-session})))
@@ -47,7 +37,7 @@
                   (fn [{:keys [error] :as resp}]
                     (if error
                       (cb resp)
-                      (handle-xrpc-response resp cb)))))
+                      (cb (auth-session resp))))))
 
 (defn create
   "Authenticate those credentials and return a session that can be used with `atproto.client`.
@@ -55,18 +45,14 @@
   The identifier can be an atproto handle or did."
   [credentials & {:as opts}]
   (let [[cb val] (i/platform-async opts)]
-    (if (not (s/valid? ::credentials credentials))
-      (cb (merge {:error "Invalid credentials."}
-                 (s/explain-data ::credentials credentials)))
-      ;; We first create an unauthenticated session to the user's PDS to
-      ;; be able to call the `createSession` xrpc procedure.
-      (unauthenticated/create (:identifier credentials)
-                              :callback
-                              (fn [{:keys [error] :as unauth-session}]
-                                (if error
-                                  (cb unauth-session)
-                                  (xrpc-create-session unauth-session credentials cb)))))
-
+    ;; We first create an unauthenticated session to the user's PDS to
+    ;; be able to call the `createSession` xrpc procedure.
+    (unauthenticated/create (:identifier credentials)
+                            :callback
+                            (fn [{:keys [error] :as unauth-session}]
+                              (if error
+                                (cb unauth-session)
+                                (xrpc-create-session unauth-session credentials cb))))
     val))
 
 (defn refresh-session
@@ -78,7 +64,7 @@
                   (fn [{:keys [error] :as resp}]
                     (if error
                       (cb resp)
-                      (handle-xrpc-response resp cb)))))
+                      (cb (auth-session resp))))))
 
 (defn auth-interceptor
   "Authenticate HTTP requests using the session."

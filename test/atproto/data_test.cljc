@@ -1,5 +1,6 @@
 (ns atproto.data-test
-  (:require #?(:clj [clojure.test :refer :all])
+  (:require #?(:clj [clojure.test :refer :all]
+               :cljs [cljs.test :refer :all])
             [clojure.spec.alpha :as s]
             [atproto.data :as data]))
 

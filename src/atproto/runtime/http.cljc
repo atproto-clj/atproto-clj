@@ -27,7 +27,7 @@
 (defn error-map
   "Given an unsuccessful HTTP response, convert to an error map"
   [resp]
-  {:error (str "HTTP " (:status resp))
+  {:error (str "http_" (:status resp))
    :http-response resp})
 
 (defn url-encode

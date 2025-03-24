@@ -2,8 +2,7 @@
   (:require [clojure.spec.alpha :as s]
             [atproto.runtime.interceptor :as i]
             [atproto.runtime.http :as http]
-            [atproto.did :as did]
-            [atproto.handle :as handle]))
+            [atproto.identity :as identity]))
 
 (s/def ::session
   (s/keys :req [::service ::authenticated? ::refreshable?]
@@ -14,10 +13,10 @@
 (s/def ::service ::http/url)
 
 ;; The DID of the authenticated user.
-(s/def ::did ::did/at-did)
+(s/def ::did ::identity/did)
 
 ;; The handle of the authenticated user, if any.
-(s/def ::handle ::handle/handle)
+(s/def ::handle ::identity/handle)
 
 ;; Whether the session is authenticated
 (s/def ::authenticated? boolean?)

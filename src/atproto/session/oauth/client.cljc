@@ -22,10 +22,10 @@
 
 (defn- oauth-session
   "Create a OAuth session that can be used with `atproto.client`."
-  [client {:keys [did handle pds tokens dpop-key] :as data}]
+  [client {:keys [did handle did-doc tokens dpop-key] :as data}]
   (let [creds (select-keys data [:tokens :dpop-key])]
     (with-meta
-      (cond-> #::session{:service pds
+      (cond-> #::session{:service (identity/did-doc-pds did-doc)
                          :authenticated? true
                          :refreshable? true}
         did (assoc ::session/did did)
@@ -103,7 +103,7 @@
 
 (defn- handle-identity
   [client {:keys [identity] :as ctx} cb]
-  (fetch-rsmd (:pds identity)
+  (fetch-rsmd (identity/did-doc-pds (:did-doc identity))
               (fn [{:keys [error] :as resp}]
                 (if error
                   (cb (merge ctx resp))
@@ -117,12 +117,12 @@
   :identity  The verified identity
   :iss       The issuer's URL."
   [client input cb]
-  (identity/resolve input
-                    :callback
-                    (fn [{:keys [error] :as resp}]
-                      (if error
-                        (cb resp)
-                        (handle-identity client {:identity resp} cb)))))
+  (identity/resolve-identity input
+                             :callback
+                             (fn [{:keys [error] :as resp}]
+                               (if error
+                                 (cb resp)
+                                 (handle-identity client {:identity resp} cb)))))
 
 ;; Pushed Authorization Request
 
@@ -274,7 +274,12 @@
                               (cb (cond
                                     error resp
                                     (not (= iss (:issuer issuer))) {:error "Issuer mismatch."}
-                                    :else (assoc body :aud (-> resp :identity :pds)))))))))))
+                                    :else (assoc body
+                                                 :aud
+                                                 (-> resp
+                                                     :identity
+                                                     :did-doc
+                                                     identity/did-doc-pds)))))))))))
 
 (defn- validate-callback-params
   "Validate the callback params.
