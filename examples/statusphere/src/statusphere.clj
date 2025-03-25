@@ -18,7 +18,7 @@
             [atproto.tid :as tid]
             [atproto.identity]
             [atproto.session :as session]
-            [atproto.session.oauth.client :as oauth-client]
+            [atproto.oauth.client :as oauth-client]
             [statusphere.auth :as auth]
             [statusphere.view :as view]
             [statusphere.db :as db])

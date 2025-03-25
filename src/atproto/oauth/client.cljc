@@ -1,4 +1,4 @@
-(ns atproto.session.oauth.client
+(ns atproto.oauth.client
   "OAuth 2 client for atproto profile."
   (:refer-clojure :exclude [resolve])
   (:require [clojure.string :as str]
@@ -10,8 +10,8 @@
             [atproto.runtime.jwt :as jwt]
             [atproto.identity :as identity]
             [atproto.session :as session]
-            [atproto.session.oauth.client.dpop :as dpop]
-            [atproto.session.oauth.client.store :as store]))
+            [atproto.oauth.client.dpop :as dpop]
+            [atproto.oauth.client.store :as store]))
 
 ;; todo:
 ;; - implement (auto-)refresh

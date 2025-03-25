@@ -1,4 +1,4 @@
-(ns atproto.session.oauth.client.dpop
+(ns atproto.oauth.client.dpop
   "DPoP implementation for the OAuth client."
   (:require [clojure.string :as str]
             [atproto.runtime.interceptor :as i]

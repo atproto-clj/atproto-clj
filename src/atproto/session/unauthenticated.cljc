@@ -26,5 +26,4 @@
 
       (s/valid? ::http/url service)
       (cb {::session/service service}))
-
     val))

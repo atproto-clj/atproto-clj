@@ -1,4 +1,4 @@
-(ns atproto.session.oauth.client.store
+(ns atproto.oauth.client.store
   (:refer-clojure :exclude [get set])
   (:require [atproto.runtime.json :as json]))
 
