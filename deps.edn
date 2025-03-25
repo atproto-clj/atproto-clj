@@ -4,7 +4,6 @@
         org.clojure/core.async {:mvn/version "1.8.711-beta1"}
         com.cnuernber/charred {:mvn/version "1.034"}
         http-kit/http-kit {:mvn/version "2.8.0"}
-        org.java-websocket/Java-WebSocket {:mvn/version "1.6.0"}
         org.slf4j/slf4j-simple {:mvn/version "2.0.16"}
         com.nimbusds/nimbus-jose-jwt {:mvn/version "10.0.2"}
         com.google.crypto.tink/tink {:mvn/version "1.7.0"}
