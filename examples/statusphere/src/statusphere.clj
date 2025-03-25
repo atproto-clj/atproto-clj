@@ -18,8 +18,8 @@
             [atproto.tid :as tid]
             [atproto.identity]
             [atproto.session :as session]
+            [atproto.oauth.client :as oauth-client]
             [statusphere.auth :as auth]
-            [atproto.session.oauth.client :as oauth-client]
             [statusphere.view :as view]
             [statusphere.db :as db])
   (:import [java.time Instant]
@@ -33,7 +33,7 @@
   "Resolve the did into a handle or return the did itself."
   [did]
   (or (get @did-handle-store did)
-      (let [{:keys [error handle] :as resp} @(atproto.identity/resolve did)
+      (let [{:keys [error handle] :as resp} @(atproto.identity/resolve-identity did)
             res (or handle did)]
         (when error
           (tap> resp))
@@ -194,6 +194,7 @@
 
 (defn -main [& args]
   (let [env (read-env (first args))]
+    (db/up!)
     (run-jetty (handler env)
                {:port (:port env)
                 :join? true})))
@@ -203,7 +204,7 @@
 (defonce server (atom nil))
 
 (defn start-dev []
-  (let [env (read-env)]
+  (let [env (read-env "./config.edn")]
     (reset! server
             (run-jetty (handler env)
                        {:port (:port env)

@@ -11,24 +11,12 @@
   channel will be returned.)"
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
-            [atproto.interceptor :as i]
+            [atproto.runtime.interceptor :as i]
             [atproto.xrpc :as xrpc]
             [atproto.session :as session]
             [atproto.session.unauthenticated :as unauthenticated-session]
             [atproto.session.credentials :as credentials-session]
             [atproto.client.config :as-alias config]))
-
-(s/def ::config
-  (s/and
-   (s/keys :opt-un [::config/session
-                    ::config/credentials
-                    ::config/service])
-   (fn [{:keys [session credentials service]}]
-     (or session credentials service))))
-
-(s/def ::config/session ::session/session)
-(s/def ::config/credentials ::credentials-session/credentials)
-(s/def ::config/service ::unauthenticated-session/service)
 
 (defn create
   "Create a new atproto client with the given config map.
@@ -50,6 +38,7 @@
                                     (if error
                                       (cb session)
                                       (cb {::session session}))))
+
       service
       (unauthenticated-session/create service
                                       :callback

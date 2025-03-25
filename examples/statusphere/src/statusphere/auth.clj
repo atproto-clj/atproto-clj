@@ -1,8 +1,8 @@
 (ns statusphere.auth
-  (:require [atproto.session.oauth.client :as oauth-client]
-            [atproto.session.oauth.client.store :as store]
-            [next.jdbc :as jdbc]
-            [next.jdbc.sql :as sql])
+  (:require [next.jdbc :as jdbc]
+            [next.jdbc.sql :as sql]
+            [atproto.oauth.client :as oauth-client]
+            [atproto.oauth.client.store :as store])
   (:import [java.net URLEncoder]))
 
 (defn state-store

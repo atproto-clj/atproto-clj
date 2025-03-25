@@ -3,16 +3,23 @@
 
   See https://atproto.com/specs/tid"
   (:require [clojure.math :refer [floor random]]
+            [clojure.spec.alpha :as s]
             #?(:clj [clojure.pprint :refer [cl-format]]
                :cljs [cljs.pprint :refer [cl-format]])))
+
+(def s32-chars "234567abcdefghijklmnopqrstuvwxyz")
+
+(def regexp (re-pattern (str "^[" s32-chars "]{13}$")))
+
+(s/def :atproto/tid
+  (s/and string?
+         #(re-find regexp %)))
 
 (defn- left-pad
   [s len ch]
   (cl-format nil (str "~" len ",'" ch "d") (str s)))
 
-(def s32-chars "234567abcdefghijklmnopqrstuvwxyz")
-
-(defn s32-encode
+(defn- s32-encode
   [n]
   (loop [n n
          s '()]
@@ -21,11 +28,11 @@
       (recur (floor (/ n 32))
              (cons (.charAt s32-chars (mod n 32)) s)))))
 
-(def timestamp-ms
+(def ^:private timestamp-ms
   "Current timestamp in milliseconds."
   #?(:clj System/currentTimeMillis))
 
-(def last-timestamp-ms (atom 0))
+(def ^:private last-timestamp-ms (atom 0))
 
 (defn- monotime-ms
   "Monotonically increasing timestamps in milliseconds."
@@ -38,22 +45,10 @@
                (+ 1 last-ts))))))
 
 ;; 10 bits for the clock-id
-(def clock-id (floor (* 1024 (random))))
+(def ^:private clock-id (floor (* 1024 (random))))
 
 (defn next-tid
   "The next monotonically increasing TID."
   []
   (str (s32-encode (* 1000 (monotime-ms)))
        (left-pad (s32-encode clock-id) 2 "2")))
-
-(comment
-
-  (require '[atproto.tid :as tid] :reload)
-
-  (tid/next-tid)
-
-  (def tids (take 10 (repeatedly tid/next-tid)))
-
-  (take 50 (map #(tid/left-pad (tid/s32-encode %) 5 "2") (range)))
-
-  )

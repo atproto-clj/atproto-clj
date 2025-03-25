@@ -1,6 +1,6 @@
-(ns atproto.session.oauth.client.store
+(ns atproto.oauth.client.store
   (:refer-clojure :exclude [get set])
-  (:require [atproto.json :as json]))
+  (:require [atproto.runtime.json :as json]))
 
 ;; todo: should we make this async?
 (defprotocol Store

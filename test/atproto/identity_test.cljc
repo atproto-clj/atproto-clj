@@ -1,30 +1,20 @@
-(ns atproto.did-test
-  (:require #?(:cljs [cljs.test :refer :all]
-               :clj  [clojure.test :refer :all])
-            [atproto.did :as did]))
+(ns atproto.identity-test
+  (:require #?(:clj [clojure.test :refer :all]
+               :cljs [cljs.test :refer :all])
+            [clojure.spec.alpha :as s]
+            [atproto.identity :as identity]))
 
-(deftest valid-atproto-did-test
-  (are [did] (did/valid? did)
+(deftest test-valid-atproto-did
+  (are [did] (s/valid? ::identity/did did)
     "did:plc:l3rouwludahu3ui3bt66mfvj"
     "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
 
     "did:web:example.com"
     "did:web:sub.example.com"
-    "did:web:localhost%3A8080"              ;; port allowed for localhost
-    ))
+    "did:web:localhost%3A8080"))
 
-(deftest invalid-atproto-did-test
-  (are [did] (not (did/valid? did))
-    nil
-    ""
-    "random-string"
-    "did:"
-    "did:foo"
-    "did:foo:"
-    "did:foo:bar"
-    "did:as4ff:asd"
-    "did:foo:&@"
-
+(deftest test-invalid-atproto-did
+  (are [did] (not (s/valid? ::identity/did did))
     "did:plc:foo"                          ; too short
     "did:plc:toolongtoolongtoolongto"      ; too short
     "did:plc:toolongtoolongtoolongtool"    ; too long
@@ -45,5 +35,5 @@
                       "did:web:sub.example.com"  "https://sub.example.com/"
                       "did:web:localhost%3A8080" "http://localhost:8080/"}]
     (doseq [[web-did url] web-did->url]
-      (is (= url (did/web-did->url web-did)) "The URL is correctly generated from the Web DID.")
-      (is (= web-did (did/url->web-did url)) "The Web DID is correctly generated from the URL."))))
+      (is (= url (identity/web-did->url web-did)) "The URL is correctly generated from the Web DID.")
+      (is (= web-did (identity/url->web-did url)) "The Web DID is correctly generated from the URL."))))

@@ -1,40 +1,29 @@
 (ns atproto.session.unauthenticated
   "Unauthenticated session for public service/ops."
   (:require [clojure.spec.alpha :as s]
-            [atproto.interceptor :as i]
-            [atproto.http :as http]
-            [atproto.did :as did]
-            [atproto.handle :as handle]
+            [atproto.runtime.interceptor :as i]
+            [atproto.runtime.http :as http]
             [atproto.identity :as identity]
             [atproto.session :as session]))
-
-(s/def ::service (s/or :handle ::handle/handle
-                       :did ::did/at-did
-                       :url ::http/url))
-
-(defn- handle-identity-resolution
-  [{:keys [error pds did handle] :as resp} cb]
-  (if error
-    (cb resp)
-    (cb (cond-> #::session{:service pds
-                           :authenticated? false
-                           :refreshable? false}
-          did (assoc ::session/did did)
-          handle (assoc ::session/handle handle)))))
 
 (defn create
   "Take a handle, did, or app URL and return an unauthenticated session."
   [service & {:as opts}]
   (let [[cb val] (i/platform-async opts)]
-    (if (not (s/valid? ::service service))
-      (cb (merge {:error "Invalid service."}
-                 (s/explain-data ::service service)))
-      (let [[type service] (s/conform ::service service)]
-        (case type
-          (:handle :did)
-          (identity/resolve service
-                            :callback
-                            #(handle-identity-resolution % cb))
-          :url
-          (cb {::session/service service}))))
+    (cond
+      (or (s/valid? ::identity/handle service)
+          (s/valid? ::identity/did service))
+      (identity/resolve-identity service
+                                 :callback
+                                 (fn [{:keys [error did did-doc handle] :as resp}]
+                                   (if error
+                                     (cb resp)
+                                     (cb (cond-> #::session{:service (identity/did-doc-pds did-doc)
+                                                            :did did
+                                                            :authenticated? false
+                                                            :refreshable? false}
+                                           handle (assoc ::session/handle handle))))))
+
+      (s/valid? ::http/url service)
+      (cb {::session/service service}))
     val))
