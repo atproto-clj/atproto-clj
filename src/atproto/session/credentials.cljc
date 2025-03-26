@@ -3,7 +3,7 @@
   (:require [clojure.spec.alpha :as s]
             [atproto.runtime.interceptor :as i]
             [atproto.identity :as identity]
-            [atproto.xrpc :as xrpc]
+            [atproto.xrpc.client :as xrpc]
             [atproto.session :as session]
             [atproto.session.unauthenticated :as unauthenticated]))
 

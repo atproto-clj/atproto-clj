@@ -1,4 +1,4 @@
-(ns atproto.xrpc
+(ns atproto.xrpc.client
   "Cross-platform XRPC client for AT Proto."
   (:require [clojure.spec.alpha :as s]
             [atproto.runtime.http :as http]

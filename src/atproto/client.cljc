@@ -12,7 +12,7 @@
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [atproto.runtime.interceptor :as i]
-            [atproto.xrpc :as xrpc]
+            [atproto.xrpc.client :as xrpc]
             [atproto.session :as session]
             [atproto.session.unauthenticated :as unauthenticated-session]
             [atproto.session.credentials :as credentials-session]

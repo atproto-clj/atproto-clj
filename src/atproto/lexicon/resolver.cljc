@@ -2,7 +2,7 @@
   (:require [atproto.runtime.interceptor :as i]
             [atproto.runtime.dns :as dns]
             [atproto.runtime.json :as json]
-            [atproto.xrpc :as xrpc]))
+            [atproto.xrpc.client :as xrpc]))
 
 (def lexicon-record-collection "com.atproto.lexicon.schema")
 
