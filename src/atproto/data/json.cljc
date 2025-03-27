@@ -15,15 +15,21 @@
 ;; -----------------------------------------------------------------------------
 
 (s/def ::value
-  (s/or :null    ::data/null
-        :boolean ::data/boolean
-        :integer ::data/integer
-        :string  ::data/string
-        :bytes   ::bytes
-        :link    ::link
-        :blob    ::blob
-        :array   (s/coll-of ::value)
-        :object  (s/map-of data/key? ::value)))
+  (s/nonconforming
+   (s/or :null    ::null
+         :boolean ::boolean
+         :integer ::integer
+         :string  ::string
+         :bytes   ::bytes
+         :link    ::link
+         :blob    ::blob
+         :array   ::array
+         :object  ::object)))
+
+(s/def ::null    ::data/null)
+(s/def ::boolean ::data/boolean)
+(s/def ::integer ::data/integer)
+(s/def ::string  ::data/string)
 
 (s/def ::bytes  (s/keys :req-un [::bytes/$bytes]))
 (s/def ::bytes/$bytes #(crypto/base64-decode %))
@@ -36,11 +42,13 @@
                    ::blob/ref
                    ::blob/mimeType
                    ::blob/size]))
-
 (s/def ::blob/$type #{"blob"})
 (s/def ::blob/ref #(data/blob-ref? (data/parse-cid %)))
 (s/def ::blob/size pos-int?)
 (s/def ::blob/mimeType ::data/mime-type)
+
+(s/def ::array (s/coll-of ::value))
+(s/def ::object (s/map-of ::data/key ::value))
 
 ;; -----------------------------------------------------------------------------
 ;; Encoding & Decoding

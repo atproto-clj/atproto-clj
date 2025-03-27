@@ -37,13 +37,7 @@
             [atproto.lexicon.schema.type.subscription :as-alias subscription]))
 
 ;; todo:
-;; - validate that the refs pointed to by `union` have `type=object`.
-
-;; The keys used in the schema and data should be keywords but not
-;; qualified keywords since those are not stable through json serialization.
-(s/def ::key
-  (s/and keyword?
-         #(not (qualified-keyword? %))))
+;; - validate that the refs pointed to by `union` in the schema have `type=object`.
 
 ;; -----------------------------------------------------------------------------
 ;; String Formats: https://atproto.com/specs/lexicon#string-formats
@@ -208,7 +202,7 @@
 
 (s/def ::file/defs
   (s/and
-   (s/map-of ::key
+   (s/map-of ::data/key
              (s/or :field   ::schema/field-type
                    :primary ::schema/primary-type))
    ;; Primary types should always have the name `main`.
@@ -307,22 +301,22 @@
           :opt-un [::object/required
                    ::object/nullable]))
 
-(s/def ::object/properties (s/map-of ::key ::schema/field-type))
-(s/def ::object/required (s/coll-of ::key))
-(s/def ::object/nullable (s/coll-of ::key))
+(s/def ::object/properties (s/map-of ::data/key ::schema/field-type))
+(s/def ::object/required (s/coll-of ::data/key))
+(s/def ::object/nullable (s/coll-of ::data/key))
 
 (defmethod field-type-spec "params" [_]
   (s/keys :req-un [::params/properties]
           :opt-un [::params/required]))
 
 (s/def ::params/properties
-  (s/map-of ::key
+  (s/map-of ::data/key
             (s/and ::schema/field-type
                    #(contains? #{"boolean" "integer" "string" "unknown" "array"}
                                (:type %)))))
 
 (s/def ::params/required
-  (s/coll-of ::key))
+  (s/coll-of ::data/key))
 
 (defmethod field-type-spec "token" [_]
   any?)
@@ -411,7 +405,7 @@
 (s/def ::message/schema (s/and ::schema/field-type #(= "union" (:type %))))
 
 ;; -----------------------------------------------------------------------------
-;; Translator: Schema -> Spec
+;; Translator (schema -> clojure spec)
 ;; -----------------------------------------------------------------------------
 
 (defn- context
@@ -674,26 +668,62 @@
   (let [spec-key (lex-uri->spec-key (resolve-ref ctx ref))]
     `(s/or ~spec-key ~spec-key)))
 
-(defmulti typed-object-spec
-  "Return the proper spec at runtime based on the object's `$type` field."
-  (constantly nil))
+(defmulti object-spec (fn [object] (if (:$type object) :typed :untyped)))
 
-(s/def ::typed-object
-  (s/multi-spec typed-object-spec :$type))
+(defmethod object-spec :typed [object]
+  (if-let [spec (s/get-spec (lex-uri->spec-key (:$type object)))]
+    (s/and ::data/object
+           spec)
+    ::data/object))
 
-(defmethod typed-object-spec :default [v]
-  (or (when-let [type (:$type v)]
-        (when (not (data/reserved-type? type))
-          (s/get-spec (lex-uri->spec-key type))))
-      ::data/object))
+(defmethod object-spec :untyped [object]
+  ::data/object)
 
 (defmethod field-type-def->spec "union"
   [ctx {:keys [refs closed]}]
-  `(s/and map?
-          #(contains? % :$type)
-          ::typed-object))
+  (let [specs (cond-> [`(s/multi-spec object-spec identity)
+                       `#(contains? % :$type)]
+                closed (conj `#(contains? ~(set refs) (:$type %))))]
+    `(s/and ~@specs)))
 
 (defmethod field-type-def->spec "unknown"
   [ctx _]
-  `(s/and map?
-          ::typed-object))
+  `(s/multi-spec object-spec identity))
+
+;; -----------------------------------------------------------------------------
+;; Loading
+;; -----------------------------------------------------------------------------
+
+(defn load
+  "Take a seq of schemas and load them, i.e. translate them and register the specs.
+
+  Loaded schemas can be passed to xrpc client and server to validate requests and responses."
+  [{:keys [schemas]}]
+  (doseq [schema schemas]
+    (if (s/valid? ::schema schema)
+      (eval
+       `(do ~@(translate schema)))
+      (throw (ex-info "InvalidLexiconSchema" {:schema schema}))))
+  {:schemas (->> (group-by :id schemas)
+                 (map (fn [[nsid schemas]]
+                        [(keyword nsid) (first schemas)]))
+                 (into {}))})
+
+(defn type-def
+  "The type def for the given Lexicon URI."
+  [lexicon lex-url]
+  (let [[nsid type-name] (str/split lex-url #"#")
+        def-key (keyword (or type-name "main"))]
+    (get-in lexicon [:schemas :defs def-key])))
+
+;; -----------------------------------------------------------------------------
+;; Validation
+;; -----------------------------------------------------------------------------
+
+(defn request-spec-key
+  [op]
+  (spec-key (nest {:ns (name op)} "request")))
+
+(defn response-spec-key
+  [op]
+  (spec-key (nest {:ns (name op)} "response")))

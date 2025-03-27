@@ -112,33 +112,31 @@
 (s/def ::blob/mimeType ::mime-type)
 (s/def ::blob/size pos-int?)
 
-(s/def ::array vector?)
+(s/def ::array
+  (s/coll-of ::value))
+
+(s/def ::key
+  (s/and keyword?
+         #(not (qualified-keyword? %))))
 
 (def reserved-type? #{"blob"})
 
-(defn key?
-  "Exclude namespaced keywords since they're not stable when encoding/decoding to strings."
-  [k]
-  (and (keyword? k)
-       (not (namespace k))))
-
 (s/def ::object
   (s/and map?
-         #(every? key? (keys %))
-         ;; we should not considered blobs as "objects"
-         #(not (reserved-type? (:$type %)))))
+         #(not (reserved-type? (:$type %)))
+         (s/map-of ::key ::value)))
 
-;; recursively validate any atproto data
 (s/def ::value
-  (s/or :null    ::null
-        :boolean ::boolean
-        :integer ::integer
-        :string  ::string
-        :bytes   ::bytes
-        :link    ::link
-        :blob    ::blob
-        :array   (s/and ::array (s/coll-of ::value))
-        :object  (s/and ::object (s/map-of key? ::value))))
+  (s/nonconforming
+   (s/or :null    ::null
+         :boolean ::boolean
+         :integer ::integer
+         :string  ::string
+         :bytes   ::bytes
+         :link    ::link
+         :blob    ::blob
+         :array   ::array
+         :object  ::object)))
 
 ;; -----------------------------------------------------------------------------
 ;; Equality
