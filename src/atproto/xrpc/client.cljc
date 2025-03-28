@@ -7,14 +7,13 @@
             [atproto.session :as session]))
 
 ;; TODO:
-;; - should parameters be in args?
-;; - how to represent authentication data?
-;; - timeout
-;; - retry w/ backoff
+;; - should async opts be in args?
+;; - add option to validate args
+;; - productionize (error handling, timeout, retry...)
 
 (defn- url
-  [service nsid]
-  (str service "/xrpc/" (name nsid)))
+  [service op]
+  (str service "/xrpc/" (name op)))
 
 (defn- handle-xrpc-response
   [{:keys [error status body] :as http-response}]
@@ -30,19 +29,12 @@
    ::i/enter (fn [ctx]
                (update ctx
                        ::i/request
-                       (fn [{:keys [op params headers]}]
-                         (let [body (when (not (and (coll? params)
-                                                    (empty? params)))
-                                      params)
-                               headers (cond
-                                         (:content-type headers) headers
-                                         (not body) headers
-                                         (coll? body) (assoc headers :content-type "application/json")
-                                         :else (throw (ex-info "Must supply content-type header" {})))]
-                           (cond-> {:method :post
-                                    :url (url (::session/service session) op)}
-                             body (assoc :body body)
-                             headers (assoc :headers headers))))))
+                       (fn [{:keys [op params input]}]
+                         (cond-> {:method :post
+                                  :url (url (::session/service session) op)
+                                  :query-params params}
+                           input (assoc :headers {:content-type (:encoding input)}
+                                        :body (:body input))))))
    ::i/leave (fn [ctx]
                (update ctx ::i/response handle-xrpc-response))})
 
@@ -53,8 +45,8 @@
               ::i/queue (->> [(procedure-interceptor session)
                               (when (::session/authenticated? session)
                                 (session/auth-interceptor session))
-                              json/interceptor
-                              http/interceptor]
+                              json/client-interceptor
+                              http/client-interceptor]
                              (remove nil?))}
              opts))
 
@@ -64,11 +56,10 @@
    ::i/enter (fn [ctx]
                (update ctx
                        ::i/request
-                       (fn [{:keys [op params headers]}]
+                       (fn [{:keys [op params]}]
                          {:method :get
                           :url (url (::session/service session) op)
-                          :query-params params
-                          :headers headers})))
+                          :query-params params})))
    ::i/leave (fn [ctx]
                (update ctx ::i/response handle-xrpc-response))})
 
@@ -79,6 +70,6 @@
               ::i/queue [(query-interceptor session)
                          (when (::session/authenticated? session)
                            (session/auth-interceptor session))
-                         json/interceptor
-                         http/interceptor]}
+                         json/client-interceptor
+                         http/client-interceptor]}
              opts))

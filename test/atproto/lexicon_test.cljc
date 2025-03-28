@@ -9,12 +9,6 @@
   #?(:cljs (:require-macros [atproto.lexicon-test :refer [interop-test-cases]])))
 
 ;; -----------------------------------------------------------------------------
-;; Schema validation
-;; -----------------------------------------------------------------------------
-
-;; todo
-
-;; -----------------------------------------------------------------------------
 ;; Translator
 ;; -----------------------------------------------------------------------------
 
@@ -379,7 +373,7 @@
   [schema]
   (let [schema-valid? (s/valid? :atproto.lexicon.schema/file schema)]
     (when (is schema-valid? "The test schema is valid.")
-      (eval `(do ~@(lexicon/translate (s/conform :atproto.lexicon.schema/file schema)))))))
+      (eval `(do ~@(lexicon/translate schema))))))
 
 (deftest test-translator
   (when (translate-and-register-specs! schema)

@@ -19,7 +19,7 @@
 (def write-str
   #?(:clj #(json/write-json-str %)))
 
-(def interceptor
+(def client-interceptor
   "Interceptor for JSON request and response bodies"
   {::i/name ::interceptor
    ::i/enter (fn [ctx]
@@ -38,3 +38,21 @@
                (if (json-content-type? response)
                  (update-in ctx [::i/response :body] read-str)
                  ctx))})
+
+(def server-interceptor
+  "Parse JSON from an HTTP request body and serialize an HTTP response body to JSON."
+  {::i/name ::server-interceptor
+   ::i/enter (fn [ctx]
+               (update ctx
+                       ::i/request
+                       (fn [{:keys [body] :as request}]
+                         (if (and body (json-content-type? request))
+                           (update request :body read-str)
+                           request))))
+   ::i/leave (fn [ctx]
+               (update ctx
+                       ::i/response
+                       (fn [{:keys [body] :as response}]
+                         (if (and body (json-content-type? response))
+                           (update response :body write-str)
+                           response))))})

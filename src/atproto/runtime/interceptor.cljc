@@ -67,10 +67,10 @@
                          :return-value ret}}
             ret))))
     #?(:clj (catch Throwable t
-              (tap> {:msg (.getMessage t)
-                     :exception (Throwable->map t)})
-              (assoc ctx ::response
-                     {:error (.getName (.getClass t))
+              (tap> (Throwable->map t))
+              (assoc ctx
+                     ::response
+                     {:error "InternalError"
                       :message (.getMessage t)
                       :exception t
                       :phase phase

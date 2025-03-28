@@ -65,8 +65,8 @@
                            :url (str "https://plc.directory/" did)
                            :follow-redirects false
                            :headers {:accept "application/did+ld+json,application/json"}}
-              ::i/queue [json/interceptor
-                         http/interceptor]}
+              ::i/queue [json/client-interceptor
+                         http/client-interceptor]}
              :callback
              (fn [{:keys [error status body] :as resp}]
                (cb (cond
@@ -146,8 +146,8 @@
   (i/execute {::i/request {:method :get
                            :timeout 3000
                            :url (str "https://" handle "/.well-known/atproto-did")}
-              ::i/queue [json/interceptor
-                         http/interceptor]}
+              ::i/queue [json/client-interceptor
+                         http/client-interceptor]}
              :callback
              (fn [{:keys [error status body] :as resp}]
                (cb (if (http/success? status)

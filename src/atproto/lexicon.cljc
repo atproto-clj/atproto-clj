@@ -105,8 +105,7 @@
          #(re-matches regex/tid %)))
 
 (s/def ::uri
-  (s/and string?
-         http/parse-uri))
+  ::http/uri)
 
 (s/def ::language
   (s/and string?
@@ -449,10 +448,10 @@
   (fn [ctx primary-type-def] (:type primary-type-def)))
 
 (defn translate
-  "Translate the conformed Lexicon file into Clojure spec forms and return them as a seq."
+  "Translate the Lexicon file into Clojure spec forms and return them as a seq."
   [{:keys [id] :as file}]
   (let [ctx (context id)]
-    (doseq [[kwd [type def]] (:defs file)]
+    (doseq [[kwd [type def]] (:defs (s/conform ::schema/file file))]
       (let [ctx (if (= :main kwd) ctx (nest ctx (name kwd)))]
         (case type
           :primary (translate-primary-type-def! ctx def)
@@ -479,67 +478,51 @@
 (defn- add-http-body-spec!
   "Translate an HTTP body schema definition into a spec."
   [ctx {:keys [encoding schema]}]
-  (let [spec-keys (cond-> []
-                    encoding
-                    (conj (add-spec! (nest ctx "encoding")
-                                     (let [pattern (s/conform ::mime-type-pattern encoding)]
-                                       `#(mime-type-pattern-match? ~pattern %))))
+  (let [spec-keys (cond-> [(add-spec! (nest ctx "encoding")
+                                      `#(mime-type-pattern-match? ~encoding %))]
                     schema
                     (conj (add-spec! (nest ctx "body")
-                                     (field-type-def->spec ctx (second schema)))))]
+                                     (field-type-def->spec ctx schema))))]
     (add-spec! ctx
                `(s/keys :req-un [~@spec-keys]))))
 
-(defn add-request-spec!
-  "Translate a primary type definition into a spec that will be used to validate XRPC requests."
-  [ctx {:keys [parameters input]}]
-  (let [spec-keys (cond-> []
-                    parameters
-                    (conj (add-spec! (nest ctx "params")
-                                     (field-type-def->spec ctx parameters)))
-
-                    input
-                    (conj (add-http-body-spec! (nest ctx "input")
-                                               input)))]
-    (add-spec! ctx
-               (if (empty? spec-keys)
-                 'any?
-                 `(s/keys :req-un [~@spec-keys])))))
-
-(defn- add-response-spec!
-  "Translate a primary type definition into a spec that will be used to validate XRPC responses."
-  [ctx {:keys [output message errors]}]
-  (let [spec-keys (cond-> []
-                    output
-                    (conj (add-http-body-spec! (nest ctx "output")
-                                               output))
-
-                    message
-                    (conj (add-spec! (nest ctx "message")
-                                     (field-type-def->spec ctx (:schema message))))
-
-                    (seq errors)
-                    (conj (add-spec! (nest ctx "error")
-                                     (set errors))))]
-    (add-spec! ctx
-               (if (empty? spec-keys)
-                 'any?
-                 `(s/keys :req-un [~@spec-keys])))))
-
 (defmethod translate-primary-type-def! "query"
-  [ctx def]
-  (add-request-spec!  (nest ctx "request")  (select-keys def [:parameters]))
-  (add-response-spec! (nest ctx "response") (select-keys def [:output :errors])))
+  [ctx {:keys [parameters output]}]
+  (let [ctx (nest ctx "request")]
+    (if parameters
+      (let [params-spec-key (add-spec! (nest ctx "params")
+                                       (field-type-def->spec ctx parameters))]
+        `(s/keys :req-un [~params-spec-key]))
+      'any?))
+  (when output
+    (add-http-body-spec! (nest ctx "response") output)))
 
 (defmethod translate-primary-type-def! "procedure"
-  [ctx def]
-  (add-request-spec!  (nest ctx "request")  (select-keys def [:parameters :input]))
-  (add-response-spec! (nest ctx "response") (select-keys def [:output :errors])))
+  [ctx {:keys [parameters input output]}]
+  (let [ctx (nest ctx "request")]
+    (let [spec-keys (cond-> []
+                      parameters
+                      (conj (add-spec! (nest ctx "params")
+                                       (field-type-def->spec ctx parameters)))
+                      input
+                      (conj (add-http-body-spec! (nest ctx "input") input)))]
+      (add-spec! ctx (if (seq spec-keys)
+                       `(s/keys :req-un [~spec-keys])
+                       'any?))))
+  (when output
+    (add-http-body-spec! (nest ctx "response") output)))
 
 (defmethod translate-primary-type-def! "subscription"
-  [ctx def]
-  (add-request-spec!  (nest ctx "request")  (select-keys def [:parameters]))
-  (add-response-spec! (nest ctx "response") (select-keys def [:message :errors])))
+  [ctx {:keys [parameters message] :as def}]
+  (when parameters
+    (let [ctx (nest ctx "request")
+          params-spec-key (add-spec! (nest ctx "params")
+                                     (field-type-def->spec ctx parameters))]
+      (add-spec! ctx `(s/keys :req-un [~params-spec-key]))))
+  (add-spec! (nest ctx "message")
+             (if message
+               (field-type-def->spec ctx (:schema message))
+               any?)))
 
 ;; Field Type Definitions
 
@@ -694,16 +677,17 @@
 ;; Loading
 ;; -----------------------------------------------------------------------------
 
-(defn load
+(defn load-schemas
   "Take a seq of schemas and load them, i.e. translate them and register the specs.
 
   Loaded schemas can be passed to xrpc client and server to validate requests and responses."
-  [{:keys [schemas]}]
+  [schemas]
   (doseq [schema schemas]
-    (if (s/valid? ::schema schema)
+    (if (s/valid? ::schema/file schema)
       (eval
        `(do ~@(translate schema)))
-      (throw (ex-info "InvalidLexiconSchema" {:schema schema}))))
+      (throw (ex-info (s/explain-str ::schema/file schema)
+                      {:schema schema}))))
   {:schemas (->> (group-by :id schemas)
                  (map (fn [[nsid schemas]]
                         [(keyword nsid) (first schemas)]))
@@ -714,16 +698,20 @@
   [lexicon lex-url]
   (let [[nsid type-name] (str/split lex-url #"#")
         def-key (keyword (or type-name "main"))]
-    (get-in lexicon [:schemas :defs def-key])))
+    (get-in lexicon [:schemas (keyword nsid) :defs def-key])))
 
 ;; -----------------------------------------------------------------------------
 ;; Validation
 ;; -----------------------------------------------------------------------------
 
 (defn request-spec-key
-  [op]
-  (spec-key (nest {:ns (name op)} "request")))
+  [nsid]
+  (spec-key (nest {:ns nsid} "request")))
 
 (defn response-spec-key
-  [op]
-  (spec-key (nest {:ns (name op)} "response")))
+  [nsid]
+  (spec-key (nest {:ns nsid} "response")))
+
+(defn message-spec-key
+  [nsid]
+  (spec-key (nest {:ns nsid} "message")))

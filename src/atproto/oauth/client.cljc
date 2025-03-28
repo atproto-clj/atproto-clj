@@ -65,7 +65,8 @@
   [server cb]
   (i/execute {::i/request {:method :get
                            :url (str server "/.well-known/oauth-protected-resource")}
-              ::i/queue [json/interceptor http/interceptor]}
+              ::i/queue [json/client-interceptor
+                         http/client-interceptor]}
              :callback (fn [{:keys [error body] :as resp}]
                          (cb (if error resp body)))))
 
@@ -74,7 +75,8 @@
   [server cb]
   (i/execute {::i/request {:method :get
                            :url (str server "/.well-known/oauth-authorization-server")}
-              ::i/queue [json/interceptor http/interceptor]}
+              ::i/queue [json/client-interceptor
+                         http/client-interceptor]}
              :callback (fn [{:keys [error body] :as resp}]
                          (cb (if error resp body)))))
 
@@ -234,8 +236,8 @@
                                  ::i/queue [(par-interceptor client server)
                                             (dpop/interceptor {:iss client_id
                                                                :dpop-key (:dpop-key server)})
-                                            json/interceptor
-                                            http/interceptor]}
+                                            json/client-interceptor
+                                            http/client-interceptor]}
                                 :callback cb))))))
     val))
 
@@ -255,8 +257,8 @@
                              :dpop-key dpop-key}
                 ::i/queue [(dpop/interceptor {:iss client_id
                                               :dpop-key dpop-key})
-                           json/interceptor
-                           http/interceptor]}
+                           json/client-interceptor
+                           http/client-interceptor]}
                :callback
                (fn [{:keys [error status body] :as http-response}]
                  (cond

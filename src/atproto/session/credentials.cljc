@@ -16,23 +16,24 @@
 
 (defn- auth-session
   "Build a session from the PDS response."
-  [{:keys [did didDoc handle] :as resp} cb]
-  (cb (with-meta
-        (cond-> #::session{:service (identity/did-doc-pds didDoc)
-                           :did did
-                           :authenticated? true
-                           :refreshable? true}
-          handle (assoc ::session/handle handle))
-        {`session/auth-interceptor #(auth-interceptor % (select-keys resp [:accessJwt :refreshJwt]))
-         `session/refresh-session refresh-session})))
+  [{:keys [did didDoc handle] :as resp}]
+  (with-meta
+    (cond-> #::session{:service (identity/did-doc-pds didDoc)
+                       :did did
+                       :authenticated? true
+                       :refreshable? true}
+      handle (assoc ::session/handle handle))
+    {`session/auth-interceptor #(auth-interceptor % (select-keys resp [:accessJwt :refreshJwt]))
+     `session/refresh-session refresh-session}))
 
 (defn- xrpc-create-session
   "Call `createSession` on the PDS to authenticate those credentials."
   [unauth-session credentials cb]
   (xrpc/procedure unauth-session
                   {:op :com.atproto.server.createSession
-                   :params {:identifier (::session/did unauth-session)
-                            :password (:password credentials)}}
+                   :input {:encoding "application/json"
+                           :body {:identifier (::session/did unauth-session)
+                                  :password (:password credentials)}}}
                   :callback
                   (fn [{:keys [error] :as resp}]
                     (if error
