@@ -36,7 +36,7 @@
 
 (defn base64url-encode
   "bytes -> url-safe base64 string."
-  [^byte/1 bytes]
+  [^bytes bytes]
   #?(:clj (str (Base64URL/encode bytes))))
 
 (defn generate-pkce

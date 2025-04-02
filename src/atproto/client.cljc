@@ -12,54 +12,77 @@
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [atproto.runtime.interceptor :as i]
-            [atproto.xrpc.client :as xrpc]
-            [atproto.session :as session]
-            [atproto.session.unauthenticated :as unauthenticated-session]
-            [atproto.session.credentials :as credentials-session]
-            [atproto.client.config :as-alias config]))
+            [atproto.xrpc.client :as xrpc-client]
+            [atproto.identity :as identity]
+            [atproto.credentials :as credentials]))
 
 (defn create
   "Create a new atproto client with the given config map.
 
-  Supported keys:
-  :session     (optional) The unauthenticated or authenticated session to use.
-  :credentials (optional) Convenience to create a Credentials-based session (if no :session).
-  :service     (optional) Convenience to create an Unauthenticated session (if no :session)."
-  [{:keys [session credentials service] :as config} & {:as opts}]
+  Supported keys in the config map:
+  :service            Handle, DID, or app URL to connect to.
+  :session            Required to make authenticated requests to the service.
+  :credentials        Convenience to automatically create a credentials-based session.
+  :validate-requests? Whether to validate requests before sending them to the server."
+  [{:keys [service credentials session validate-requests?] :as config} & {:as opts}]
   (let [[cb val] (i/platform-async opts)]
     (cond
-      session
-      (cb {::session session})
 
+      ;; Resolve the service endpoint if a handle or DID was passed
+      (or (s/valid? ::identity/handle service)
+          (s/valid? ::identity/did service))
+      (identity/resolve-identity service
+                                 :callback
+                                 (fn [{:keys [error did did-doc handle] :as resp}]
+                                   (if error
+                                     (cb resp)
+                                     (create (assoc config
+                                                    :service
+                                                    (identity/did-doc-pds did-doc))
+                                             :callback cb))))
+
+      ;; Create a credentials-based session if credentials were passed
       credentials
-      (credentials-session/create credentials
-                                  :callback
-                                  (fn [{:keys [error] :as session}]
-                                    (if error
-                                      (cb session)
-                                      (cb {::session session}))))
+      (credentials/create credentials
+                          :callback
+                          (fn [{:keys [error] :as session}]
+                            (if error
+                              (cb error)
+                              (create (-> config
+                                          (dissoc :credentials)
+                                          (assoc :session session))
+                                      :callback cb))))
 
-      service
-      (unauthenticated-session/create service
-                                      :callback
-                                      (fn [{:keys [error] :as session}]
-                                        (if error
-                                          (cb session)
-                                          (cb {::session session})))))
+      ;; Otherwise create an XRPC client for the service/session
+      :else
+      (cb (xrpc-client/create
+           (cond-> {:validate-requests? (boolean validate-requests?)}
+             service (assoc :service service)
+             session (assoc :session session)))))
     val))
 
 (defn did
   "The did of the authenticated user, or nil."
-  [{:keys [::session]}]
-  (and (::session/authenticated? session)
-       (::session/did session)))
+  [{:keys [session]}]
+  (and session
+       (:did @session)))
 
 (defn procedure
-  "Issue a procedure call with the given arguments."
-  [{:keys [::session]} args & {:as opts}]
-  (xrpc/procedure session args opts))
+  "Call the procedure on the server with the given parameters.
+
+  The `request` map accepts the following keys:
+  :nsid      NSID of the procedure, `string`, required.
+  :params    Procedure parameters, `map`, optional.
+  :body      Body of the procedure call, `::atproto/data` or `bytes`, optional
+  :encoding  MIME type of the body, `string`, required if the body are `bytes`."
+  [client request & {:as opts}]
+  (xrpc-client/procedure client request opts))
 
 (defn query
-  "Issue a query with the igven arguments."
-  [{:keys [::session]} args & {:as opts}]
-  (xrpc/query session args opts))
+  "Issue a query against the server with the given parameters.
+
+  The `reuqest` map accepts the following keys:
+  :nsid      NSID of the query, `string`, required.
+  :params    Query parameters, `map`, optional."
+  [client request & {:as opts}]
+  (xrpc-client/query client request opts))

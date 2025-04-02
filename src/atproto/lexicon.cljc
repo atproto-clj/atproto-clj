@@ -5,11 +5,14 @@
   See https://atproto.com/specs/lexicon"
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
+            #?(:clj [clojure.java.io :as io])
             [atproto.data :as data]
             [atproto.lexicon.regex :as regex]
             [atproto.runtime.string :refer [utf8-length grapheme-length]]
             [atproto.runtime.datetime :as datetime]
             [atproto.runtime.http :as http]
+            [atproto.runtime.json :as json]
+            [atproto.runtime.cast :as cast]
             ;; Aliases for spec keys
             [atproto.lexicon.schema                   :as-alias schema]
             [atproto.lexicon.schema.file              :as-alias file]
@@ -301,8 +304,8 @@
                    ::object/nullable]))
 
 (s/def ::object/properties (s/map-of ::data/key ::schema/field-type))
-(s/def ::object/required (s/coll-of ::data/key))
-(s/def ::object/nullable (s/coll-of ::data/key))
+(s/def ::object/required (s/coll-of string?))
+(s/def ::object/nullable (s/coll-of string?))
 
 (defmethod field-type-spec "params" [_]
   (s/keys :req-un [::params/properties]
@@ -315,7 +318,7 @@
                                (:type %)))))
 
 (s/def ::params/required
-  (s/coll-of ::data/key))
+  (s/coll-of string?))
 
 (defmethod field-type-spec "token" [_]
   any?)
@@ -430,7 +433,7 @@
   [ctx name]
   (update ctx :ns str "." name))
 
-(defn- add-spec!
+(defn- add-spec
   "Add the spec definition to the context and return the key."
   [ctx spec]
   (let [spec-key (spec-key ctx)]
@@ -443,7 +446,7 @@
   Implementations can add 'sub specs' in the context as needed."
   (fn [ctx type-def] (:type type-def)))
 
-(defmulti ^:private translate-primary-type-def!
+(defmulti ^:private translate-primary-type-def
   "Translate the Lexicon Primary Type Definition into spec forms and add them to the context."
   (fn [ctx primary-type-def] (:type primary-type-def)))
 
@@ -454,8 +457,8 @@
     (doseq [[kwd [type def]] (:defs (s/conform ::schema/file file))]
       (let [ctx (if (= :main kwd) ctx (nest ctx (name kwd)))]
         (case type
-          :primary (translate-primary-type-def! ctx def)
-          :field   (add-spec! ctx (field-type-def->spec ctx def)))))
+          :primary (translate-primary-type-def ctx def)
+          :field   (add-spec ctx (field-type-def->spec ctx def)))))
     @(:defs ctx)))
 
 (defn- rkey-type->spec
@@ -467,62 +470,61 @@
     :literal `#{~rkey-value}
     :any     ::record-key))
 
-(defmethod translate-primary-type-def! "record"
+(defmethod translate-primary-type-def "record"
   [ctx {:keys [key record]}]
-  (let [rkey-spec-key (add-spec! (nest ctx "key")
-                                 (rkey-type->spec key))]
-    (add-spec! ctx `(s/and
-                     (s/keys :req-un [~rkey-spec-key])
-                     ~(field-type-def->spec ctx record)))))
+  ;; ignore the record key in the validation (for now)
+  (add-spec ctx (field-type-def->spec ctx record)))
 
-(defn- add-http-body-spec!
-  "Translate an HTTP body schema definition into a spec."
+(defn- add-params-spec
+  [ctx parameters]
+  (add-spec ctx (field-type-def->spec ctx parameters)))
+
+(defn- add-body-specs
   [ctx {:keys [encoding schema]}]
-  (let [spec-keys (cond-> [(add-spec! (nest ctx "encoding")
-                                      `#(mime-type-pattern-match? ~encoding %))]
-                    schema
-                    (conj (add-spec! (nest ctx "body")
-                                     (field-type-def->spec ctx schema))))]
-    (add-spec! ctx
-               `(s/keys :req-un [~@spec-keys]))))
+  (cond-> [(add-spec (nest ctx "encoding")
+                     `#(mime-type-pattern-match? ~encoding %))]
+    schema
+    (conj (add-spec (nest ctx "body")
+                    (field-type-def->spec ctx schema)))))
 
-(defmethod translate-primary-type-def! "query"
-  [ctx {:keys [parameters output]}]
-  (let [ctx (nest ctx "request")]
-    (if parameters
-      (let [params-spec-key (add-spec! (nest ctx "params")
-                                       (field-type-def->spec ctx parameters))]
-        `(s/keys :req-un [~params-spec-key]))
-      'any?))
-  (when output
-    (add-http-body-spec! (nest ctx "response") output)))
+(defn- add-request-spec
+  [ctx {:keys [parameters input]}]
+  (add-spec ctx (let [spec-keys (cond-> []
+                                  parameters
+                                  (conj (add-params-spec (nest ctx "params") parameters))
 
-(defmethod translate-primary-type-def! "procedure"
-  [ctx {:keys [parameters input output]}]
-  (let [ctx (nest ctx "request")]
-    (let [spec-keys (cond-> []
-                      parameters
-                      (conj (add-spec! (nest ctx "params")
-                                       (field-type-def->spec ctx parameters)))
-                      input
-                      (conj (add-http-body-spec! (nest ctx "input") input)))]
-      (add-spec! ctx (if (seq spec-keys)
-                       `(s/keys :req-un [~spec-keys])
-                       'any?))))
-  (when output
-    (add-http-body-spec! (nest ctx "response") output)))
+                                  input
+                                  (concat (add-body-specs ctx input)))]
+                  (if (seq spec-keys)
+                    ;; we don't know if any of the parameters are required so
+                    ;; we conform :params to an empty map and validate against the spec
+                    `(s/and (s/conformer #(update % :params (fnil identity {})))
+                            (s/keys :req-un ~spec-keys))
+                    'any?))))
 
-(defmethod translate-primary-type-def! "subscription"
+(defn- add-response-spec
+  [ctx {:keys [output]}]
+  (add-spec ctx (if output
+                  `(s/keys :req-un ~(add-body-specs ctx output))
+                  'any?)))
+
+(defmethod translate-primary-type-def "query"
+  [ctx def]
+  (add-request-spec (nest ctx "request") def)
+  (add-response-spec (nest ctx "response") def))
+
+(defmethod translate-primary-type-def "procedure"
+  [ctx def]
+  (add-request-spec (nest ctx "request") def)
+  (add-response-spec (nest ctx "response") def))
+
+(defmethod translate-primary-type-def "subscription"
   [ctx {:keys [parameters message] :as def}]
-  (when parameters
-    (let [ctx (nest ctx "request")
-          params-spec-key (add-spec! (nest ctx "params")
-                                     (field-type-def->spec ctx parameters))]
-      (add-spec! ctx `(s/keys :req-un [~params-spec-key]))))
-  (add-spec! (nest ctx "message")
-             (if message
-               (field-type-def->spec ctx (:schema message))
-               any?)))
+  (add-request-spec (nest ctx "request") def)
+  (let [ctx (nest ctx "message")]
+    (add-spec ctx (if message
+                    (field-type-def->spec ctx (:schema message))
+                    'any?))))
 
 ;; Field Type Definitions
 
@@ -599,7 +601,7 @@
                          (update keys
                                  (if (required? prop-key) :required :optional)
                                  conj
-                                 (add-spec! ctx spec))))
+                                 (add-spec ctx spec))))
                      {:required []
                       :optional []}
                      properties)]
@@ -616,13 +618,12 @@
                          (update keys
                                  (if (required? prop-key) :required :optional)
                                  conj
-                                 (add-spec! ctx spec))))
+                                 (add-spec ctx spec))))
                      {:required []
                       :optional []}
                      properties)]
-    `(s/and ::data/object
-            (s/keys :req-un ~(:required keys)
-                    :opt-un ~(:optional keys)))))
+    `(s/keys :req-un ~(:required keys)
+             :opt-un ~(:optional keys))))
 
 (defmethod field-type-def->spec "token"
   [ctx _]
@@ -677,32 +678,57 @@
 ;; Loading
 ;; -----------------------------------------------------------------------------
 
-(defn load-schemas
-  "Take a seq of schemas and load them, i.e. translate them and register the specs.
+(defn lexicon
+  "Create a new Lexicon with the given schemas.
 
-  Loaded schemas can be passed to xrpc client and server to validate requests and responses."
+  A lexicon is a map: nsid -> schema."
   [schemas]
-  (doseq [schema schemas]
-    (if (s/valid? ::schema/file schema)
-      (eval
-       `(do ~@(translate schema)))
-      (throw (ex-info (s/explain-str ::schema/file schema)
-                      {:schema schema}))))
-  {:schemas (->> (group-by :id schemas)
-                 (map (fn [[nsid schemas]]
-                        [(keyword nsid) (first schemas)]))
-                 (into {}))})
+  (reduce (fn [lexicon schema]
+            (if (s/valid? ::schema/file schema)
+              (do
+                (cast/dev {:message (str "Adding schema to Lexicon: " (:id schema))})
+                (assoc lexicon (:id schema) schema))
+              (throw (ex-info (s/explain-str ::schema/file schema)
+                              (s/explain-data ::schema/file schema)))))
+          {}
+          schemas))
+
+#?(:clj
+   (defn load-resources!
+     "Load the Lexicon schemas at the resource path and return a Lexicon."
+     [resource-path]
+     (->> (io/resource resource-path)
+          (io/file)
+          (file-seq)
+          (filter #(str/ends-with? (.getName %) ".json"))
+          (map #(json/read-str (slurp %)))
+          lexicon)))
+
+(defn register-specs!
+  "Register the specs from this lexicon."
+  [lexicon]
+  (doseq [schema (vals lexicon)]
+    (eval
+     `(do ~@(translate schema)))))
 
 (defn type-def
-  "The type def for the given Lexicon URI."
-  [lexicon lex-url]
-  (let [[nsid type-name] (str/split lex-url #"#")
-        def-key (keyword (or type-name "main"))]
-    (get-in lexicon [:schemas (keyword nsid) :defs def-key])))
+  "The type definition for this Lexicon URL."
+  [lexicon lex-uri]
+  (let [[nsid type-name] (str/split lex-uri #"#")]
+    (get-in lexicon [nsid :defs (keyword (or type-name "main"))])))
 
 ;; -----------------------------------------------------------------------------
 ;; Validation
 ;; -----------------------------------------------------------------------------
+
+(defmulti record-spec (constantly nil))
+
+(defmethod record-spec :default
+  [{:keys [$type] :as record}]
+  (lex-uri->spec-key $type))
+
+(s/def ::record
+  (s/multi-spec record-spec identity))
 
 (defn request-spec-key
   [nsid]

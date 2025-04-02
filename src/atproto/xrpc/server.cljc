@@ -2,174 +2,169 @@
   "Functions to implement atproto HTTP services."
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
+            [clojure.walk :refer [stringify-keys]]
             [atproto.runtime.interceptor :as i]
             [atproto.runtime.http :as http]
             [atproto.runtime.json :as json]
+            [atproto.runtime.cast :as cast]
+            [atproto.data.json :as atproto-json]
             [atproto.lexicon :as lexicon]))
 
-;; -----------------------------------------------------------------------------
-;; Response/Error helpers
-;; -----------------------------------------------------------------------------
+(defn create
+  [{:keys [lexicon validate-response?] :as config}]
+  (lexicon/register-specs! lexicon)
+  config)
 
-(defn- invalid-request
+(defn invalid-request
   [message]
   {:status 400
    :error "InvalidRequest"
    :message message})
 
-(defn- method-not-allowed
-  []
-  {:status 405
-   :error "InvalidRequest"
-   :message "Method Not Allowed"})
-
-(defn- internal-server
-  []
-  {:status 500
-   :error "InternalServerError"
-   :message "Internal Server Error"})
-
-(defn- invalid-response
+(defn invalid-response
   [message]
   {:status 500
    :error "InvalidResponse"
    :message message})
 
-(defn- method-not-implemented
-  [op]
+(defn internal-server-error
+  []
+  {:status 500
+   :error "InternalServerError"
+   :message "Internal Server Error"})
+
+(defn method-not-implemented
+  []
   {:status 501
    :error "MethodNotImplemented"
-   :message (str "Method Not Implemented: " op)})
+   :message "Method Not Implemented"})
 
-(defn json-output
-  [body]
-  {:encoding "application/json"
-   :body body})
+(defn auth-required
+  []
+  {:status 401
+   :error "AuthenticationRequired"
+   :message "Authentication Required"})
 
-;; -----------------------------------------------------------------------------
-;; Request parsing
-;; -----------------------------------------------------------------------------
-
-(def xrpc-prefix "/xrpc")
-
-(defn url->nsid
-  "Return the NSID in this XRPC URL, if valid."
-  [url]
-  (when-let [{:keys [path]} (http/parse-url url)]
-    (when (str/starts-with? path xrpc-prefix)
-      (let [nsid (subs path (inc (count xrpc-prefix)))]
-        (when (s/valid? ::lexicon/nsid nsid)
-          nsid)))))
-
-(defn validate-http-request
-  "Validate the HTTP request and return the NSID if valid and found in the lexicon."
-  [lexicon {:keys [method url]}]
-  (let [nsid (url->nsid url)]
-    (if (not nsid)
-      (invalid-request "Invalid URL.")
-      (let [type-def (lexicon/type-def lexicon nsid)]
-        (if (not type-def)
-          (invalid-request "Unknown NSID.")
-          (let [{:keys [type parameters input]} type-def
-                expected-method (case type
-                                  "procedure"    :post
-                                  "query"        :get
-                                  "subscription" :get)]
-            (if (not (= method expected-method))
-              (method-not-allowed)
-              {:nsid nsid
-               :type-def type-def})))))))
+(defn decode-query-param
+  "Decode a query string parameter based on the type definition."
+  [type-def val]
+  (case (:type type-def)
+    "boolean" (case val
+                "true"  true
+                "false" false
+                val)
+    "integer" (if (re-matches #"^-?[0-9]+$" val)
+                (clojure.edn/read-string val)
+                val)
+    "string"  val
+    "unknown" val
+    "array"   (mapv #(decode-query-param (:items type-def) %) val)))
 
 (defn- query-params->xrpc-params
   "Parse the HTTP query parameters according to the Lexicon definition."
-  [parameters query-params]
-  (reduce (fn [query-params [p-name {:keys [type default]}]]
-            (cond-> query-params
+  [{:keys [properties]} query-params]
+  (reduce (fn [query-params [p-name type-def]]
+            (cond
+              (contains? query-params p-name)
+              (assoc query-params p-name (decode-query-param type-def (query-params p-name)))
 
-              ;; set the default value from the schema
-              (and default (not (contains? query-params p-name)))
-              (assoc p-name default)
+              (:default type-def)
+              (assoc query-params p-name (:default type-def))
 
-              ;; convert the "true" and "false" strings into booleans
-              (and (= type "boolean") (contains? query-params p-name))
-              (update p-name #(case %
-                                "true" true
-                                "false" false
-                                %))))
+              :else
+              query-params))
           query-params
-          parameters))
+          properties))
 
-(defn- http-request->xrpc-request
-  [lexicon {:keys [method url query-params headers body] :as http-request}]
-  (let [{:keys [error nsid type-def] :as resp} (validate-http-request lexicon http-request)]
-    (if error
-      resp
-      (let [{:keys [parameters input]} type-def
-            xrpc-request (cond-> {:op (keyword nsid)}
-                           (some? parameters)
-                           (assoc :params
-                                  (if (seq query-params)
-                                    (query-params->xrpc-params parameters
-                                                               query-params)
-                                    {}))
+(defn http-request->xrpc-request
+  "Validate the HTTP request and return the NSID if valid and found in the lexicon."
+  [lexicon {:keys [method url query-params headers body app-ctx]}]
+  (let [nsid (subs (:path (http/parse-url url))
+                   (count "/xrpc/"))
+        type-def (lexicon/type-def lexicon nsid)]
+    (if (not type-def)
+      (invalid-request "Unknown NSID")
+      (let [{:keys [type parameters input]} type-def
+            expected-method (case type
+                              "procedure"    :post
+                              "query"        :get
+                              "subscription" :get)]
+        (if (not (= expected-method method))
+          (invalid-request "Incorrect HTTP method")
+          (if (and (some? body) (not (:content-type headers)))
+            (invalid-request "Missing encoding")
+            (let [xrpc-request (cond-> {:nsid nsid}
+                                 (some? parameters)
+                                 (assoc :params (query-params->xrpc-params parameters
+                                                                           query-params))
 
-                           (some? input)
-                           (assoc :input
-                                  {:encoding (:content-type headers)
-                                   :body body}))
-            spec-key (lexicon/request-spec-key nsid)]
-        (if (not (s/valid? spec-key xrpc-request))
-          (invalid-request (s/explain-str spec-key xrpc-request))
-          xrpc-request)))))
+                                 (some? input)
+                                 (assoc :encoding (:content-type headers)
+                                        :body body)
 
-;; -----------------------------------------------------------------------------
-;; Interceptors
-;; -----------------------------------------------------------------------------
+                                 app-ctx
+                                 (assoc :app-ctx app-ctx))
+                  spec-key (lexicon/request-spec-key nsid)]
+              (if (not (s/valid? spec-key xrpc-request))
+                (invalid-request (s/explain-str spec-key xrpc-request))
+                xrpc-request))))))))
 
 (defmulti handle
-  "Handle the XRPC request: procedure or query.
+  "Handle the XRPC request.
 
-  The implementation takes an `::xrpc/request` and return an `::xrpc/response`."
-  :op)
+  Takes a request map with:
+  :nsid      The NSID of the procedure or query (string)
+  :params    The query parameters as a map
+  :body      The input for procedures. `::atproto/data` or `bytes`
+  :encoding  The encoding of the body (`application/json` for `::atproto/data`)
 
-(defmethod handle :default
-  [{:keys [op] :as request}]
-  (method-not-implemented op))
+  The function must return a map with:
+  :body      The response body: `::atproto/data` or `bytes`.
+  :encoding  The encoding of the body (`application/json` for `::atproto/data`)"
+  :nsid)
+
+(defmethod handle :default [_] (method-not-implemented))
 
 (defn interceptor
-  "Handle HTTP requests and delegate execution to an `handle` method implementation after parsing/validation."
-  [{:keys [lexicon]}]
+  "Handle HTTP requests and delegate execution to a `handle` method after parsing/validation."
+  [{:keys [lexicon validate-response?]}]
   {::i/name ::interceptor
    ::i/enter (fn [{:keys [::i/request] :as ctx}]
-               (let [{:keys [error] :as xrpc-request} (http-request->xrpc-request lexicon request)]
-                 (assoc ctx
-                        ::i/response
-                        (if error
+               (cast/dev request)
+               (assoc ctx
+                      ::i/response
+                      (let [xrpc-request (http-request->xrpc-request lexicon request)]
+                        (cast/dev xrpc-request)
+                        (if (:error xrpc-request)
                           xrpc-request
                           (let [xrpc-response (handle xrpc-request)]
-                            (if (not (:validate-response? ctx))
+                            (if (:error xrpc-response)
                               xrpc-response
-                              (let [spec-key (lexicon/response-spec-key (name (:op xrpc-request)))]
-                                (if (s/valid? spec-key xrpc-response)
-                                  xrpc-response
-                                  (invalid-response (s/explain-str spec-key xrpc-response))))))))))
+                              (or (when validate-response?
+                                    (let [spec-key (lexicon/response-spec-key (:nsid xrpc-request))]
+                                      (when (not (s/valid? spec-key xrpc-response))
+                                        (invalid-response (s/explain-str spec-key xrpc-response)))))
+                                  xrpc-response)))))))
    ::i/leave (fn [ctx]
                (update ctx
                        ::i/response
-                       (fn [xrpc-response]
-                         (if (:error xrpc-response)
-                           (let [{:keys [error status message]} xrpc-response]
-                             {:status (or status 500)
-                              :headers {:content-type "application/json"}
-                              :body (cond-> {:error error}
-                                      (some? message) (assoc :message message))})
-                           (let [{:keys [encoding body]} xrpc-response]
-                             {:status 200
-                              :headers {:content-type encoding}
-                              :body body})))))})
+                       (fn [{:keys [error status message encoding body] :as xrpc-response}]
+                         (if error
+                           (do
+                             (cast/alert xrpc-response)
+                             (if (not status)
+                               (internal-server-error)
+                               {:status status
+                                :headers {:content-type "application/json"}
+                                :body (cond-> {:error error}
+                                        (some? message) (assoc :message message))}))
+                           {:status 200
+                            :headers {:content-type encoding}
+                            :body body}))))})
 
-(defn handle-request
-  [http-request & {:as opts}]
+(defn handle-http-request
+  [server http-request & {:as opts}]
   (i/execute {::i/request http-request
               ::i/queue [json/server-interceptor
-                         interceptor]}))
+                         atproto-json/server-interceptor
+                         (interceptor server)]}))

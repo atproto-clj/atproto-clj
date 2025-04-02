@@ -98,7 +98,7 @@
 (s/def ::integer (s/and int?
                         js-safe-int?))
 (s/def ::string string?)
-(s/def ::bytes bytes?)
+(s/def ::bytes bytes/bytes?)
 (s/def ::link cid-link?)
 
 (s/def ::blob
@@ -146,8 +146,8 @@
 (defn eq?
   [a b]
   (or (= a b)
-      (and (bytes? a)
-           (bytes? b)
+      (and (bytes/bytes? a)
+           (bytes/bytes? b)
            (bytes/eq? a b))
       (and (vector? a)
            (vector? b)

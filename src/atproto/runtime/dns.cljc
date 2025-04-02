@@ -23,7 +23,9 @@
                                               {"java.naming.factory.initial"
                                                "com.sun.jndi.dns.DnsContextFactory"}))]
                                 {:values (seq (some-> dir-ctx
-                                                      (.getAttributes hostname ^String/1 (into-array String [type]))
+                                                      (.getAttributes hostname
+                                                                      ^"[Ljava.lang.String;"
+                                                                      (into-array String [type]))
                                                       (.get type)
                                                       (.getAll)
                                                       (enumeration-seq)))})

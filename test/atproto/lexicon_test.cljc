@@ -286,8 +286,8 @@
     {:type "object"
      :properties {:int {:type "integer"}
                   :string {:type "string"}}
-     :required [:int]
-     :nullable [:string]
+     :required ["int"]
+     :nullable ["string"]
      ::valid [{:int 0}
               {:int 0 :string "foobar"}
               {:int 0 :string nil}]
@@ -303,7 +303,7 @@
     {:type "params"
      :properties {:a {:type "boolean"}
                   :b {:type "string"}}
-     :required [:a]
+     :required ["a"]
      ::valid [{:a true}
               {:a false :b "foobar"}]
      ::invalid [{}
@@ -384,4 +384,4 @@
               (str "\"" valid "\" is a valid " spec-key)))
         (doseq [invalid (::invalid def)]
           (is (not (s/valid? spec-key invalid))
-              (str "\"" invalid "\" is not a valid " spec-key)))))))
+              (str "[" invalid "] is not a valid " spec-key)))))))

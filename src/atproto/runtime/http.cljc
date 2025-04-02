@@ -4,11 +4,14 @@
             [clojure.spec.alpha :as s]
             [clojure.walk :refer [stringify-keys]]
             [atproto.runtime.interceptor :as i]
-            #?(:clj [org.httpkit.client :as http])
             [atproto.runtime.http.request :as-alias request]
             [atproto.runtime.http.response :as-alias response]
-            [atproto.runtime.http.url :as-alias url])
-  #?(:clj (:import [java.net URI URL MalformedURLException URLEncoder URLDecoder])))
+            [atproto.runtime.http.url :as-alias url]
+            [atproto.runtime.cast :as cast]
+            #?@(:clj [[org.httpkit.client :as http]]))
+  #?(:clj (:import [java.net URI URL MalformedURLException URLEncoder URLDecoder])
+     :cljs (:import [goog.net EventType XhrIo]
+                    [goog Uri])))
 
 #?(:clj (set! *warn-on-reflection* true))
 
@@ -43,20 +46,30 @@
   [s]
   #?(:clj (URLDecoder/decode s)))
 
-(defn- query-string->query-params
+(defn query-string->query-params
   [qs]
   (some->> (str/split qs #"&")
            (map #(str/split % #"="))
            (reduce (fn [m [k v]]
-                     (cond-> m
-                       (not (str/blank? v))
-                       (update (keyword k)
+                     (if (str/blank? v)
+                       m
+                       (update m
+                               (keyword k)
                                #(let [dv (url-decode v)]
                                   (cond
                                     (coll? %) (conj % dv)
                                     (some? %) [% dv]
                                     :else     dv)))))
                    {})))
+
+(defn query-params->query-string
+  [qp]
+  (some->> qp
+           (mapcat (fn [[k v]]
+                     (if (coll? v)
+                       (map #(str (name k) "=" (url-encode %)) v)
+                       [(str (name k) "=" (url-encode v))])))
+           (str/join "&" )))
 
 (defn parse-url
   "Return a map with: [protocol]://[host]:[port][path]?[query-params]#[fragment]
@@ -81,8 +94,7 @@
            (not (str/blank? (.getPath url))) (assoc :path (.getPath url))
            (seq params)                      (assoc :query-params params)
            fragment                          (assoc :fragment fragment)))
-       (catch Exception e
-         (tap> e)))))
+       (catch Exception _))))
 
 (s/def ::url
   (s/and string?
@@ -90,6 +102,7 @@
 
 (s/def ::uri
   (s/and string?
+         #(not (str/blank? %))
          #?(:clj #(try (URI. %) (catch Exception _)))))
 
 (defn serialize-url
@@ -97,7 +110,7 @@
 
   The query-params values will be URL-encoded."
   [{:keys [protocol host port path query-params fragment]}]
-  (str protocol "://"
+  (str (name protocol) "://"
        host
        (when port (str ":" port))
        path
@@ -108,20 +121,54 @@
               (str "?")))
        (when fragment (str "#" fragment))))
 
-(def client-interceptor
-  "Runtime-specific HTTP client interceptor."
+(defn handle-request
+  "runtime-specific handling of the http request"
+  [http-request cb]
   #?(:clj
-     {::i/name ::client
-      ::i/enter (fn [ctx]
-                  (let [ctx (update-in ctx [::i/request :headers] stringify-keys)]
-                    (tap> (::i/request ctx))
-                    (http/request (::i/request ctx)
-                                  (fn [{:keys [^Throwable error] :as resp}]
-                                    (tap> resp)
-                                    (i/continue
-                                     (assoc ctx ::i/response (if error
-                                                               {:error (.getName (.getClass error))
-                                                                :message (.getMessage error)
-                                                                :exception error}
-                                                               (dissoc resp :opts))))))
-                    nil))}))
+     (http/request (update http-request :headers stringify-keys)
+                   (fn [{:keys [^Throwable error] :as http-response}]
+                     (let [http-response (dissoc http-response :opts)]
+                       (cb (if error
+                             {:error "HTTPClientError"
+                              :message (.getMessage error)
+                              :ex error}
+                             http-response)))))
+
+     :cljs
+     (let [{:keys [method url query-params headers body]} http-request]
+       (let [uri (doto (Uri. url)
+                   (.setQuery (query-params->query-string query-params)))
+             xhr (doto (XhrIo.)
+                   (.setTimeoutInterval 0))]
+         (.listen xhr
+                  EventType/COMPLETE
+                  (fn [evt]
+                    (let [target (.-target evt)
+                          error (not-empty (.getLastError target))
+                          http-response {:status (.getStatus target)
+                                         :headers (->> (.getAllResponseHeaders target)
+                                                       (str/split-lines)
+                                                       (reduce (fn [headers line]
+                                                                 (let [[k v] (str/split line #":")]
+                                                                   (if (not (str/blank? k))
+                                                                     (assoc headers
+                                                                            (keyword
+                                                                             (str/lower-case
+                                                                              (str/trim k)))
+                                                                            (str/trim v))
+                                                                     headers)))
+                                                               {}))
+                                         :body (.getResponse target)}]
+                      (cb http-response))))
+         (.send xhr
+                uri
+                (name method)
+                body
+                (clj->js (stringify-keys headers)))))))
+
+(def client-interceptor
+  {::i/name ::client
+   ::i/enter (fn [{:keys [::i/request] :as ctx}]
+               (handle-request request
+                               (fn [response]
+                                 (i/continue (assoc ctx ::i/response response)))))})

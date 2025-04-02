@@ -207,7 +207,8 @@
     (let [handle (or handle
                      (first (did-doc-handles did-doc)))]
       (cond-> {:did (:id did-doc)
-               :did-doc did-doc}
+               :did-doc did-doc
+               :pds (did-doc-pds did-doc)}
         handle (assoc :handle handle)))))
 
 (defn- resolve-with-did
