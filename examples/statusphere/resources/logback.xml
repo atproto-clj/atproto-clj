@@ -1,0 +1,15 @@
+<configuration>
+  <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+    <file>statusphere.log</file>
+    <append>true</append>
+    <encoder>
+      <pattern>%msg%n%throwable</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="atproto" level="DEBUG"/>
+
+  <root level="WARN">
+    <appender-ref ref="FILE"/>
+  </root>
+</configuration>

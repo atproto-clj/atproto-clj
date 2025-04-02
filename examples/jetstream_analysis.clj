@@ -1,8 +1,8 @@
 (ns jetstream-analysis
   (:require
-   [charred.api                 :as json]
-   [clojure.core.async          :as async]
-   [clojure.java.io             :as io]
+   [charred.api :as json]
+   [clojure.core.async :as async]
+   [clojure.java.io :as io]
    [atproto.jetstream :as jetstream])
   (:import
    [java.time Duration Instant]))

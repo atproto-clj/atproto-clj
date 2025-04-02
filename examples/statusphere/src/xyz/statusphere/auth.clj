@@ -1,4 +1,4 @@
-(ns statusphere.auth
+(ns xyz.statusphere.auth
   (:require [next.jdbc :as jdbc]
             [next.jdbc.sql :as sql]
             [atproto.oauth.client :as oauth-client]
