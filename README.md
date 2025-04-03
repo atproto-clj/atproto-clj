@@ -60,37 +60,29 @@ You can also provide a `:channel`, `:callback` or `:promise` keyword option to r
 
 Connect to Bluesky's [Jetstream service](https://docs.bsky.app/blog/jetstream) to get real-time updates of public network data. Jetstream provides a JSON-based alternative to the binary CBOR firehose, making it easier to work with post streams, likes, follows, and other events.
 
+The Jetstream implementation is currently only supported for JVM Clojure.
+
 ```clojure
-(require '[atproto.jetstream :as jetstream]
-         '[clojure.core.async          :as async]
-         '[examples.jetstream-analysis :as analysis]))
+(require '[atproto.jetstream :as jet])
+(require '[clojure.core.async :as a]))
 
-;; Connect with default settings (subscribes to posts)
-(def conn (jetstream/connect-jetstream (async/chan 1024)))
+;; Define a channel to recieve events
+(def events-ch (a/chan))
 
-;; Print out a single post (with 5 second timeout)
-(let [event (async/alt!!
-             (:events conn)    ([v] v)
-             (async/timeout 5000) :timeout)]
-  (clojure.pprint/pprint event))
+;; Subscribe to the jetstream
+(def control-ch (jet/consume events-ch :wanted-collections ["app.bsky.feed.post"]))
 
-;; Start analyzing the stream
-(def analysis (analysis/start-analysis conn))
+;; Consume events
+(a/go-loop [count 0]
+  (if-let [event (a/<! events-ch)]
+    (do
+      (when (zero? (rem count 100)) (println (format "Got %s posts" count)))
+      (recur (inc count)))
+    (println "event channel closed")))
 
-;; Get current statistics about post rates, sizes, etc
-(analysis/get-summary @(:state analysis))
-
-;; Save sample messages for offline analysis
-(analysis/collect-samples conn
-                        {:count    10
-                         :filename "samples/my-samples.json"})
-
-;; Cleanup
-(analysis/stop-analysis analysis)
-(jetstream/disconnect conn)
+;; Stop processing
+(a/close! control-ch)
 ```
-
-Check out the `examples.jetstream-analysis` namespace for a complete example of stream processing and analysis.
 
 ## References
 
