@@ -195,12 +195,15 @@
   [handler]
   (fn [{:keys [app-ctx session] :as request}]
     (let [{:keys [oauth-client]} app-ctx]
-      (or (when-let [did (:did session)]
-            (let [{:keys [error] :as oauth-session} @(oauth-client/restore oauth-client did)]
-              (if error
-                (cast/alert oauth-session)
-                (handler (assoc-in request [:app-ctx :atproto-client] @(client/create {:session oauth-session}))))))
-          (handler request)))))
+      (handler
+       (if-let [did (:did session)]
+         (let [{:keys [error] :as oauth-session} @(oauth-client/restore oauth-client did)]
+           (if error
+             (do
+               (cast/alert oauth-session)
+               request)
+             (assoc-in request [:app-ctx :atproto-client] @(client/create {:session oauth-session})))))
+       request))))
 
 (defn handler
   [env]
