@@ -130,11 +130,9 @@
   [{:keys [lexicon validate-response?]}]
   {::i/name ::interceptor
    ::i/enter (fn [{:keys [::i/request] :as ctx}]
-               (cast/dev request)
                (assoc ctx
                       ::i/response
                       (let [xrpc-request (http-request->xrpc-request lexicon request)]
-                        (cast/dev xrpc-request)
                         (if (:error xrpc-request)
                           xrpc-request
                           (let [xrpc-response (handle xrpc-request)]

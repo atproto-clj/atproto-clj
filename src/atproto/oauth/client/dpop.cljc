@@ -28,16 +28,6 @@
                   (crypto/base64url-encode
                    (crypto/sha256
                     (subs auth 5)))))
-          _ (cast/dev {::claims {:iss iss
-                                 :jti (crypto/generate-nonce 12)
-                                 :htm (str/upper-case (name method))
-                                 :htu url
-                                 :iat (crypto/now)
-                                 :nonce nonce
-                                 :ath ath}})
-          _ (cast/dev {::headers {:typ "dpop+jwt"
-                                  :alg default-alg
-                                  :jwk (jwt/public-jwk dpop-key)}})
           proof (jwt/generate dpop-key
                               {:typ "dpop+jwt"
                                :alg default-alg

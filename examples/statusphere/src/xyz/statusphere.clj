@@ -4,6 +4,7 @@
             [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
             [clojure.tools.logging :as log]
+            [clojure.core.async :as async]
             [cljs.build.api :refer [build]]
             [cljs.repl :as repl]
             [cljs.repl.browser :as browser]
@@ -27,12 +28,15 @@
             [atproto.lexicon :as lexicon]
             [atproto.runtime.cast :as cast]
             [atproto.runtime.json :as json]
+            [atproto.jetstream :as jet]
             [xyz.statusphere.auth :as auth]
             [xyz.statusphere.db :as db])
   (:import [java.time Instant]
            [java.util Base64]))
 
+;; -----------------------------------------------------------------------------
 ;; DID resolver
+;; -----------------------------------------------------------------------------
 
 (defonce did-handle-store (atom {}))
 
@@ -55,27 +59,9 @@
           {}
           dids))
 
-;; Inject the clients in the request's :app-ctx
-
-(defn wrap-oauth-client
-  "Inject the oauth client in the request."
-  [handler client]
-  (fn [req]
-    (handler (assoc-in req [:app-ctx :oauth-client] client))))
-
-(defn wrap-atproto-client
-  "If the user is authenticated, restore the oauth session and inject the atproto client in the request."
-  [handler]
-  (fn [{:keys [app-ctx session] :as request}]
-    (let [{:keys [oauth-client]} app-ctx]
-      (or (when-let [did (:did session)]
-            (let [{:keys [error] :as oauth-session} @(oauth-client/restore oauth-client did)]
-              (if error
-                (cast/alert oauth-session)
-                (handler (assoc-in request [:app-ctx :atproto-client] @(client/create {:session oauth-session}))))))
-          (handler request)))))
-
+;; -----------------------------------------------------------------------------
 ;; XRPC API implementation
+;; -----------------------------------------------------------------------------
 
 (defn profile->profile-view
   [did {:keys [avatar displayName createdAt]}]
@@ -158,7 +144,7 @@
                  :body {:status (status->status-view optimistic-status)}}))))))))
 
 ;; -----------------------------------------------------------------------------
-;; Routes
+;; Web server
 ;; -----------------------------------------------------------------------------
 
 (defn app
@@ -198,6 +184,24 @@
    (GET "*" _
      (r/resource-response "public/index.html"))))
 
+(defn wrap-oauth-client
+  "Inject the oauth client in the request."
+  [handler client]
+  (fn [req]
+    (handler (assoc-in req [:app-ctx :oauth-client] client))))
+
+(defn wrap-atproto-client
+  "If the user is authenticated, restore the oauth session and inject the atproto client in the request."
+  [handler]
+  (fn [{:keys [app-ctx session] :as request}]
+    (let [{:keys [oauth-client]} app-ctx]
+      (or (when-let [did (:did session)]
+            (let [{:keys [error] :as oauth-session} @(oauth-client/restore oauth-client did)]
+              (if error
+                (cast/alert oauth-session)
+                (handler (assoc-in request [:app-ctx :atproto-client] @(client/create {:session oauth-session}))))))
+          (handler request)))))
+
 (defn handler
   [env]
   (let [oauth-client (auth/client env db/db)
@@ -213,7 +217,69 @@
         (wrap-keyword-params)
         (wrap-params))))
 
-(defn read-env
+(defn start-web-server
+  [{:keys [port] :as config}]
+  (cast/event {:message "Starting the web server..."})
+  (let [server (run-jetty (handler config)
+                          {:port port
+                           :join? false})]
+    (cast/event {:message "Web server started."})
+    server))
+
+(defn stop-web-server
+  [server]
+  (cast/event {:message "Stopping the web server..."})
+  (.stop server)
+  (cast/event {:message "Web server stopped..."}))
+
+;; -----------------------------------------------------------------------------
+;; Ingester
+;; -----------------------------------------------------------------------------
+
+(defn start-ingester
+  [config]
+  (cast/event {:message "Starting the ingester..."})
+  (let [status-collection "xyz.statusphere.status"
+        events-ch (async/chan)
+        control-ch (jet/consume events-ch
+                                :wanted-collections [status-collection])]
+    (async/go-loop []
+      (when-let [{:keys [did commit]} (async/<! events-ch)]
+        (when-let [{:keys [operation collection rkey record]} commit]
+          (when (and (= status-collection collection)
+                     (= "create" operation))
+            (if (not (s/valid? ::lexicon/record record))
+              (cast/event {:message "Invalid status."
+                           :record record
+                           :explain-data (s/explain-data ::lexicon/record record)})
+              (let [status {:uri (str "at://" did "/" status-collection "/" rkey)
+                            :author_did did
+                            :status (:status record)
+                            :created_at (:createdAt record)
+                            :indexed_at (str (Instant/now))}]
+                (jdbc/execute-one!
+                 db/db
+                 ["insert into status (uri, author_did, status, created_at, indexed_at) values (?, ?, ?, ?, ?) on conflict(uri) do update set status=?, indexed_at=?"
+                  (:uri status) (:author_did status) (:status status) (:created_at status) (:indexed_at status)
+                  (:status status) (:indexed_at status)])
+                (cast/event {:message "Ingester: status received"
+                             :status status}))))))
+      (recur))
+    (cast/event {:message "Ingester started."})
+    {:control-ch control-ch}))
+
+(defn stop-ingester
+  [{:keys [control-ch]}]
+  (cast/event {:message "Stopping the ingester..."})
+  (async/close! control-ch)
+  (cast/event {:message "Ingester stopped."}))
+
+;; -----------------------------------------------------------------------------
+;; Service
+;; -----------------------------------------------------------------------------
+
+(defn read-config
+  "Read the configuration from an edn file."
   [config-edn-path]
   (let [{:keys [port cookie-secret]} (-> (io/file config-edn-path)
                                          (io/reader)
@@ -222,15 +288,9 @@
     {:port port
      :cookie-secret (.decode (Base64/getDecoder) cookie-secret)}))
 
-(defn register-cast-handlers
-  [env]
-  (cast/handle-uncaught-exceptions)
-  (cast/register :alert cast/log)
-  (cast/register :event cast/log)
-  (cast/register :dev   cast/log))
-
 (defn build-client
-  [{:keys [prod?] :as env}]
+  [{:keys [prod?] :as config}]
+  (cast/event {:message "Building the client..."})
   (build "src"
          (merge {:main 'xyz.statusphere
                  :output-to "resources/public/js/main.js"
@@ -238,34 +298,62 @@
                  :asset-path "/js"}
                 (if prod?
                   {:optimizations :advanced}
-                  {:optimizations :none}))))
+                  {:optimizations :none})))
+  (cast/event {:message "Client built."}))
+
+(defn init-db
+  [config]
+  (cast/event {:message "Initializing the database..."})
+  (db/up!)
+  (cast/event {:message "Database initialized."}))
+
+
+
+(defn register-cast-handlers
+  [config]
+  (cast/handle-uncaught-exceptions)
+  (cast/register :alert cast/log)
+  (cast/register :event cast/log)
+  (cast/register :dev   cast/log))
+
+(defn stop
+  [{:keys [server ingester]}]
+  (stop-ingester ingester)
+  (stop-web-server server))
 
 (defn start
-  [{:keys [prod? port] :as env}]
-  (build-client env)
-  (register-cast-handlers env)
-  (db/up!)
-  (run-jetty (handler env)
-             {:port port
-              :join? (if prod? true false)}))
+  [config]
+  (register-cast-handlers config)
+  (build-client config)
+  (init-db config)
+  (let [service {:ingester (start-ingester config)
+                 :server (start-web-server config)}]
+    (.addShutdownHook (Runtime/getRuntime)
+                      (Thread.
+                       #(stop service)))
+    service))
 
 (defn -main [& args]
-  (start (assoc (read-env (first args))
-                :prod? true)))
+  (start (assoc (read-config (first args))
+                :prod? true))
+  @(promise))
 
 ;; -----------------------------------------------------------------------------
 ;; Development
 ;; -----------------------------------------------------------------------------
 
-(defonce server (atom nil))
+(defonce service (atom nil))
 
 (defn start-dev []
-  (start (assoc (read-env "./config.edn")
-                :prod? false)))
+  (reset! service
+          (start (assoc (read-config "./config.edn")
+                        :prod? false)))
+  :started)
 
 (defn stop-dev []
-  (when @server
-    (.stop @server)))
+  (when @service
+    (stop @service))
+  :stopped)
 
 (defn restart-dev []
   (stop-dev)
@@ -273,11 +361,11 @@
 
 (comment
 
-  (require 'xyz.statusphere :reload-all)
+  (require 'xyz.statusphere :reload)
 
   (xyz.statusphere/restart-dev)
 
-  (xyz.statusphere/build-client)
+  (xyz.statusphere/stop-dev)
 
   (clojure.java.browse/browse-url "http://127.0.0.1:8080")
 

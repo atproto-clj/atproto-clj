@@ -97,7 +97,6 @@
                (update ctx
                        ::i/request
                        (fn [{:keys [nsid params encoding body] :as request}]
-                         (cast/dev request)
                          (let [encoding (or encoding
                                             (and (coll? body) "application/json")
                                             (throw (ex-info "Missing encoding" request)))]

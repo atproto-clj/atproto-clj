@@ -26,7 +26,6 @@
 (defn- oauth-session
   "Create a OAuth session that can be used with `xrpc.client`."
   [client {:keys [did handle did-doc tokens dpop-key] :as data}]
-  (cast/dev {::session-data data})
   (with-meta
     (cond-> {:pds (identity/did-doc-pds did-doc)
              :did did

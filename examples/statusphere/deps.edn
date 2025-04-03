@@ -9,13 +9,10 @@
         cljsjs/react-dom {:mvn/version "18.3.1-1"}
         reagent/reagent {:mvn/version "1.3.0"}
         atproto-clj/atproto-clj {:local/root "../.."}
-        ch.qos.logback/logback-classic {:mvn/version "1.5.18"}}
+        org.slf4j/slf4j-simple {:mvn/version "2.0.16"}}
  :aliases
  {;; clj -M:dev
   :dev {:extra-paths ["dev"]
-        :extra-deps {}
-        :jvm-opts ["-Datproto.runtime.cast.dev-enabled=true"
-                   "-Dclojure.tools.logging.factory=clojure.tools.logging.impl/slf4j-factory"]}
+        :jvm-opts ["-Datproto.runtime.cast.dev-enabled=true"]}
   ;; clj -M:run
-  :run {:main-opts ["-m" "xyz.statusphere" "config.edn"]
-        :jvm-opts ["-Dclojure.tools.logging.factory=clojure.tools.logging.impl/slf4j-factory"]}}}
+  :run {:main-opts ["-m" "xyz.statusphere" "config.edn"]}}}

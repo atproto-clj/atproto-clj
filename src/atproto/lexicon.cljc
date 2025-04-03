@@ -686,7 +686,7 @@
   (reduce (fn [lexicon schema]
             (if (s/valid? ::schema/file schema)
               (do
-                (cast/dev {:message (str "Adding schema to Lexicon: " (:id schema))})
+                (cast/event {:message (str "Adding schema to Lexicon: " (:id schema))})
                 (assoc lexicon (:id schema) schema))
               (throw (ex-info (s/explain-str ::schema/file schema)
                               (s/explain-data ::schema/file schema)))))
