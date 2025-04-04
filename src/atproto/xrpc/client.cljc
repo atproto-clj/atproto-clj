@@ -28,11 +28,11 @@
   [{:keys [validate-requests?]}]
   {::i/name ::request-validator
    ::i/enter (fn [{:keys [::i/request] :as ctx}]
-               (let [spec (lexicon/request-spec-key (:nsid request))]
-                 (if (and validate-requests?
-                          (not (s/valid? spec request)))
-                   (throw (ex-info (s/explain-str spec request)
-                                   (s/explain-data spec request)))
+               (let [spec (binding [lexicon/*schema-validate* validate-requests?]
+                            (lexicon/request-spec-key (:nsid request)))]
+                 (if (not (s/valid? spec request))
+                   (throw (ex-info "Invalid Request"
+                                   {:explain-data (s/explain-data spec request)}))
                    ctx)))})
 
 (defprotocol Session

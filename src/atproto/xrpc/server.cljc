@@ -93,18 +93,14 @@
           (invalid-request "Incorrect HTTP method")
           (if (and (some? body) (not (:content-type headers)))
             (invalid-request "Missing encoding")
-            (let [xrpc-request (cond-> {:nsid nsid}
-                                 (some? parameters)
-                                 (assoc :params (query-params->xrpc-params parameters
-                                                                           query-params))
+            (cond-> {:nsid nsid}
+              (some? parameters)
+              (assoc :params (query-params->xrpc-params parameters
+                                                        query-params))
 
-                                 (some? input)
-                                 (assoc :encoding (:content-type headers)
-                                        :body body))
-                  spec-key (lexicon/request-spec-key nsid)]
-              (if (not (s/valid? spec-key xrpc-request))
-                (invalid-request (s/explain-str spec-key xrpc-request))
-                xrpc-request))))))))
+              (some? input)
+              (assoc :encoding (:content-type headers)
+                     :body body))))))))
 
 (defmulti handle
   "Handle the XRPC request.
@@ -130,17 +126,20 @@
                (assoc ctx
                       ::i/response
                       (let [xrpc-request (http-request->xrpc-request lexicon request)]
-                        (cast/dev xrpc-request)
                         (if (:error xrpc-request)
                           xrpc-request
-                          (let [xrpc-response (handle (:app-ctx request) xrpc-request)]
-                            (if (:error xrpc-response)
-                              xrpc-response
-                              (or (when validate-response?
-                                    (let [spec-key (lexicon/response-spec-key (:nsid xrpc-request))]
-                                      (when (not (s/valid? spec-key xrpc-response))
-                                        (invalid-response (s/explain-str spec-key xrpc-response)))))
-                                  xrpc-response)))))))
+                          (let [spec-key (binding [lexicon/*schema-validate* true]
+                                           (lexicon/request-spec-key (:nsid xrpc-request)))]
+                            (if (not (s/valid? spec-key xrpc-request))
+                              (invalid-request (s/explain-str spec-key xrpc-request))
+                              (let [xrpc-response (handle (:app-ctx request) xrpc-request)]
+                                (if (:error xrpc-response)
+                                  xrpc-response
+                                  (let [spec-key (binding [lexicon/*schema-validate* validate-response?]
+                                                   (lexicon/response-spec-key (:nsid xrpc-request)))]
+                                    (if (not (s/valid? spec-key xrpc-response))
+                                      (invalid-response (s/explain-str spec-key xrpc-response))
+                                      xrpc-response))))))))))
    ::i/leave (fn [ctx]
                (update ctx
                        ::i/response

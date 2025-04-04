@@ -32,13 +32,13 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | Repo Storage        | ⭕ | ⭕ | ⭕ |
 | Stream Server       | ⭕ | ⭕ | ⭕ |
 
-✅ - great! complete, documented, examples, accessible to new devs with no atproto experience
-🟢 - decent. mostly implemented, could point experienced devs at it
-🟡 - partial progress: incomplete, undocumented, not ergonomic
-🚧 - early work in progress, but not usable yet
-⭕ - nothing started
-🟣 - something exists; not assessed
-❓ - unknown (need to check status)
+- ✅ great! complete, documented, examples, accessible to new devs with no atproto experience
+- 🟢 decent. mostly implemented, could point experienced devs at it
+- 🟡 partial progress: incomplete, undocumented, not ergonomic
+- 🚧 early work in progress, but not usable yet
+- ⭕ nothing started
+- 🟣 something exists; not assessed
+- ❓ unknown (need to check status)
 
 We're not currently planning on supporting Bluesky-specific functionalities: post helpers, social graph helpers, label behaviors, preferences.
 
@@ -59,7 +59,7 @@ The ATProto client supports 3 authentication modes:
 - Credentials-based authentication to use with your own username/password for CLI tools
 - OAuth to make query/procedure calls on your users' behalf.
 
-You specify the mode when intiializing the client.
+You specify the mode when initializing the client.
 
 ```clojure
 (require '[atproto.client :as at])
@@ -141,7 +141,7 @@ The platform-specific functions are under the `atproto.runtime` namespace. Most 
 | `lexicon`      | Schema definition and validation functions for records, queries, and procedure calls. |
 | `runtime`      | Runtime-specific functions. |
 | `tid`          | Timestamp identifiers for records. |
-| `xrpc.client`  | XRPC client to talk to XRPC servers. |
+| `xrpc.client`  | To make queries and procedure calls to XRPC servers. |
 | `xrpc.server`  | To implement XRPC servers. |
 
 ## Contribute

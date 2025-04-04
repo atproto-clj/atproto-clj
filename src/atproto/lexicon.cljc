@@ -3,6 +3,7 @@
   HTTP endpoints (XRPC), and event stream messages.
 
   See https://atproto.com/specs/lexicon"
+  #?(:clj (:refer-clojure :exclude [bytes?]))
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
             #?(:clj [clojure.java.io :as io])
@@ -13,6 +14,7 @@
             [atproto.runtime.http :as http]
             [atproto.runtime.json :as json]
             [atproto.runtime.cast :as cast]
+            [atproto.runtime.bytes :refer [bytes?]]
             ;; Aliases for spec keys
             [atproto.lexicon.schema                   :as-alias schema]
             [atproto.lexicon.schema.file              :as-alias file]
@@ -721,22 +723,59 @@
 ;; Validation
 ;; -----------------------------------------------------------------------------
 
+(def ^{:dynamic true
+       :doc "Whether to validate against the Lexicon schema."}
+  *schema-validate* false)
+
 (defmulti record-spec (constantly nil))
 
 (defmethod record-spec :default
   [{:keys [$type] :as record}]
-  (lex-uri->spec-key $type))
+  (if *schema-validate*
+    (lex-uri->spec-key $type)
+    ;; even if we don't validate against the schema, we ensure it is valid ATProto data.
+    ::data/object))
 
 (s/def ::record
   (s/multi-spec record-spec identity))
 
+(s/def ::request
+  (s/keys :opt-un [::params ::body ::encoding]))
+
+(s/def ::param
+  (s/nonconforming
+   (s/or :boolean ::data/boolean
+         :integer ::data/integer
+         :string  ::data/string
+         :array   (s/coll-of ::param))))
+
+(s/def ::params
+  (s/map-of ::data/key
+            ::param))
+
+(s/def ::body
+  (s/nonconforming
+   (s/or :data ::data/object
+         :bytes bytes?)))
+
+(s/def ::encoding
+  ::mime-type)
+
+(s/def ::response
+  (s/keys :req-un [::body]
+          :opt-un [::encoding]))
+
 (defn request-spec-key
   [nsid]
-  (spec-key (nest {:ns nsid} "request")))
+  (if *schema-validate*
+    (spec-key (nest {:ns nsid} "request"))
+    ::request))
 
 (defn response-spec-key
   [nsid]
-  (spec-key (nest {:ns nsid} "response")))
+  (if *schema-validate*
+    (spec-key (nest {:ns nsid} "response"))
+    ::response))
 
 (defn message-spec-key
   [nsid]

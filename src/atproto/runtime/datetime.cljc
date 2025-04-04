@@ -27,4 +27,4 @@
 
 (defn current-time-millis
   []
-  #?(:clj System/currentTimeMillis))
+  #?(:clj (System/currentTimeMillis)))
