@@ -1,6 +1,7 @@
 (ns xyz.statusphere.db
-  (:require [clojure.instant :refer [read-instant-date]]
-            [next.jdbc :as jdbc]))
+  (:require [next.jdbc :as jdbc]
+            [next.jdbc.sql :as sql]
+            [atproto.runtime.cast :as cast]))
 
 (def db
   {:dbtype "sqlite"
@@ -37,3 +38,32 @@
   []
   (mapv #(jdbc/execute-one! db [%])
         drop-tables))
+
+(defn init
+  []
+  (cast/event {:message "Initializing the database..."})
+  (up!)
+  (cast/event {:message "Database initialized."}))
+
+(defn statuses
+  [{:keys [limit]}]
+  (sql/query db ["select * from status order by indexed_at desc limit ?" limit]))
+
+(defn user-status
+  [{:keys [did]}]
+  (first
+   (sql/query db
+              ["select * from status where author_did = ? order by indexed_at desc limit 1"
+               did])))
+
+(defn upsert-status!
+  [{:keys [status/uri
+           status/author_did
+           status/status
+           status/created_at
+           status/indexed_at]}]
+  (jdbc/execute-one! db
+                     [(str "insert into status"
+                           " (uri, author_did, status, created_at, indexed_at) values (?, ?, ?, ?, ?)"
+                           " on conflict(uri) do update set status=?, indexed_at=?")
+                      uri author_did status created_at indexed_at status indexed_at]))

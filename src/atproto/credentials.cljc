@@ -21,7 +21,7 @@
 (defn- xrpc-create-session
   "Call `createSession` on the PDS to authenticate those credentials."
   [identity credentials cb]
-  (let [xrpc-client (xrpc-client/create {:service (:pds identity)})]
+  (let [xrpc-client (xrpc-client/init {:service (:pds identity)})]
     (xrpc-client/procedure xrpc-client
                            {:nsid "com.atproto.server.createSession"
                             :body {:identifier (:did identity)
@@ -48,7 +48,7 @@
 
 (defn xrpc-refresh-session
   [session cb]
-  (xrpc-client/procedure (xrpc-client/create (assoc session :refresh? true))
+  (xrpc-client/procedure (xrpc-client/init (assoc session :refresh? true))
                          {:nsid "com.atproto.server.refreshSession"}
                          :callback
                          (fn [{:keys [error] :as resp}]

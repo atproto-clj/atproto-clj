@@ -15,8 +15,8 @@
 ;; - pagination w/ cursor
 ;; - consider bubbling up server error in the response map
 
-(defn create
-  "Initialize the XRPC client."
+(defn init
+  "Initialize a new XRPC client and return it."
   [{:keys [service session validate-requests?] :as config}]
   (if (and (not service) (not session))
     (throw (ex-info "A service or a session is required." config))

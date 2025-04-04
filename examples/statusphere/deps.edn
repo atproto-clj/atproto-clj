@@ -15,4 +15,4 @@
   :dev {:extra-paths ["dev"]
         :jvm-opts ["-Datproto.runtime.cast.dev-enabled=true"]}
   ;; clj -M:run
-  :run {:main-opts ["-m" "xyz.statusphere" "config.edn"]}}}
+  :run {:main-opts ["-m" "xyz.statusphere"]}}}

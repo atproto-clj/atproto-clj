@@ -12,12 +12,12 @@
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [atproto.runtime.interceptor :as i]
-            [atproto.xrpc.client :as xrpc-client]
+            [atproto.xrpc.client :as xrpc]
             [atproto.identity :as identity]
             [atproto.credentials :as credentials]))
 
-(defn create
-  "Create a new atproto client with the given config map.
+(defn init
+  "Initialize a new atproto client with the given config map.
 
   Supported keys in the config map:
   :service            Handle, DID, or app URL to connect to.
@@ -36,10 +36,10 @@
                                  (fn [{:keys [error did did-doc handle] :as resp}]
                                    (if error
                                      (cb resp)
-                                     (create (assoc config
-                                                    :service
-                                                    (identity/did-doc-pds did-doc))
-                                             :callback cb))))
+                                     (init (assoc config
+                                                  :service
+                                                  (identity/did-doc-pds did-doc))
+                                           :callback cb))))
 
       ;; Create a credentials-based session if credentials were passed
       credentials
@@ -48,14 +48,14 @@
                           (fn [{:keys [error] :as session}]
                             (if error
                               (cb error)
-                              (create (-> config
-                                          (dissoc :credentials)
-                                          (assoc :session session))
-                                      :callback cb))))
+                              (init (-> config
+                                        (dissoc :credentials)
+                                        (assoc :session session))
+                                    :callback cb))))
 
-      ;; Otherwise create an XRPC client for the service/session
+      ;; Otherwise initialize an XRPC client for the service/session
       :else
-      (cb (xrpc-client/create
+      (cb (xrpc/init
            (cond-> {:validate-requests? (boolean validate-requests?)}
              service (assoc :service service)
              session (assoc :session session)))))
@@ -76,7 +76,7 @@
   :body      Body of the procedure call, `::atproto/data` or `bytes`, optional
   :encoding  MIME type of the body, `string`, required if the body are `bytes`."
   [client request & {:as opts}]
-  (xrpc-client/procedure client request opts))
+  (xrpc/procedure client request opts))
 
 (defn query
   "Issue a query against the server with the given parameters.
@@ -85,4 +85,4 @@
   :nsid      NSID of the query, `string`, required.
   :params    Query parameters, `map`, optional."
   [client request & {:as opts}]
-  (xrpc-client/query client request opts))
+  (xrpc/query client request opts))

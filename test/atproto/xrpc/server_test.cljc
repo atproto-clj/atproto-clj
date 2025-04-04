@@ -12,7 +12,7 @@
 ;; - subscription?
 
 (def server
-  (server/create
+  (server/init
    {:validate-response? true
     :lexicon (lexicon/lexicon
               [{:lexicon 1
@@ -38,11 +38,11 @@
 (def ^:dynamic *impl* identity)
 
 (defmethod server/handle "com.example.query"
-  [xrpc-request]
+  [ctx xrpc-request]
   (*impl* xrpc-request))
 
 (defmethod server/handle "com.example.procedure"
-  [xrpc-request]
+  [ctx xrpc-request]
   (*impl* xrpc-request))
 
 (defn- url

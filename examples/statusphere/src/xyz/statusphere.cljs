@@ -1,15 +1,18 @@
 (ns xyz.statusphere
-  (:require [cljs.core.async :as async]
+  (:require [cljs.core.async :as a]
             [reagent.core :as r]
             [reagent.dom :as rd]
             ["react-dom/client" :refer [createRoot]]
-            [atproto.client :as client]
-            [atproto.runtime.cast :as cast]))
+            [atproto.client :as at]
+            [atproto.runtime.cast :as cast])
+  (:require-macros [xyz.statusphere :refer [config-map]]))
 
 (enable-console-print!)
 (cast/register :alert  cast/log)
 (cast/register :event  cast/log)
 (cast/register :dev    cast/log)
+
+(def config (config-map))
 
 (def status-options ["👍", "👎", "💙", "🥹", "😧", "😤", "🙃", "😉", "😎", "🤓", "🤨", "🥳", "😭", "😤", "🤯", "🫡", "💀", "✊", "🤘", "👀", "🧠", "👩‍💻", "🧑‍💻", "🥷", "🧌", "🦋", "🚀"])
 
@@ -39,7 +42,7 @@
 
 (defn app
   [client]
-  (let [{:keys [error client statuses profile status]} @state]
+  (let [{:keys [error statuses profile status]} @state]
     [:div#root
 
      (when error
@@ -83,10 +86,10 @@
                                :name "status"
                                :value option
                                :on-click (fn [evt]
-                                           (async/go
-                                             (let [resp (<! (client/procedure client
-                                                                              {:nsid "xyz.statusphere.sendStatus"
-                                                                               :body {:status option}}))]
+                                           (a/go
+                                             (let [resp (<! (at/procedure client
+                                                                          {:nsid "xyz.statusphere.sendStatus"
+                                                                           :body {:status option}}))]
                                                (swap! state (fn [state]
                                                               (cond-> state
                                                                 (:status resp) (update :statuses #(into [(:status resp)] %))
@@ -94,34 +97,41 @@
                       option])]
 
       ;; list of statuses
-      [:div
-       (for [[idx {:keys [profile createdAt] :as status}] (map-indexed vector statuses)]
-         (let [handle (or (:handle profile) (:did profile))
-               date (js/Date. createdAt)]
-           ^{:key idx} [:div {:class (str "status-line" (when (zero? idx) " no-line"))}
-                        [:div
-                         [:div {:class "status"} (:status status)]]
-                        [:div {:class "desc"}
-                         [:a {:class "author"
-                              :href (bsky-link handle)}
-                          (str "@" handle)]
-                         (if (today? date)
-                           (str " is feeling " (:status status) " today.")
-                           (str " was feeling " (:status status) " on " (format-date date)))]]))]]]))
+      (for [[idx {:keys [profile createdAt] :as status}] (map-indexed vector statuses)]
+        (let [handle (or (:handle profile) (:did profile))
+              date (js/Date. createdAt)]
+          ^{:key idx} [:div {:class (str "status-line" (when (zero? idx) " no-line"))}
+                       [:div
+                        [:div {:class "status"} (:status status)]]
+                       [:div {:class "desc"}
+                        [:a {:class "author"
+                             :href (bsky-link handle)}
+                         (str "@" handle)]
+                        (if (today? date)
+                          (str " is feeling " (:status status) " today.")
+                          (str " was feeling " (:status status) " on " (format-date date)))]]))]]))
 
 (defonce root (createRoot (js/document.getElementById "app")))
 
+(defn refresh-loop
+  [client]
+  (a/go-loop []
+    (let [statuses (a/<! (at/query client {:nsid "xyz.statusphere.getStatuses"}))]
+      (swap! state merge statuses))
+    (a/<! (a/timeout 3000))
+    (recur)))
+
 (defn main
   []
-  (async/go
-    (let [client (<! (client/create {:service "http://127.0.0.1:8080"}))
-          statuses-resp (<! (client/query client {:nsid "xyz.statusphere.getStatuses"}))
-          user-resp (<! (client/query client {:nsid "xyz.statusphere.getUser"}))]
-      (swap! state (fn [state]
-                     (merge state
-                            statuses-resp
-                            (when (not (= "AuthenticationRequired" (:error user-resp)))
-                              user-resp))))
-      (.render root (r/as-element [app client])))))
+  (a/go
+    (let [client (at/init {:service (:url config)})
+          statuses (a/<! (at/query client {:nsid "xyz.statusphere.getStatuses"}))
+          user (a/<! (at/query client {:nsid "xyz.statusphere.getUser"}))]
+      (swap! state #(merge %
+                           statuses
+                           (when (not (= "AuthenticationRequired" (:error user)))
+                             user)))
+      (.render root (r/as-element [app client]))
+      (refresh-loop client))))
 
 (main)

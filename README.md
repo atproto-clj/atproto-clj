@@ -20,7 +20,7 @@ The SDK supports three types of session:
 
 `query` and `procedure` calls use the "NSID" of the query or procedure, and a Clojure map of parameters.
 
-All calls (including the call to `create`) are asynchronous, and return immediately. The return value depends on platform:
+All calls (including the call to `init`) are asynchronous, and return immediately. The return value depends on platform:
 
 - Clojure: a Clojure promise.
 - ClojureScript: a core.async channel.
@@ -29,17 +29,17 @@ All calls (including the call to `create`) are asynchronous, and return immediat
 You can also provide a `:channel`, `:callback` or `:promise` keyword option to recieve the return value. Not all options are supported on all platforms.
 
 ```clojure
-(require '[atproto.client :as client])
+(require '[atproto.client :as at])
 
 ;; Unauthenticated client to public endpoint
-(def client @(client/create {:service "https://public.api.bsky.app"}))
+(def client @(at/init {:service "https://public.api.bsky.app"}))
 
 ;; Bluesky endpoints and their query params can be found here:
 ;; https://docs.bsky.app/docs/category/http-reference
 
 ;; Credentials-based authenticated client
-(def client @(client/create {:credentials {:identifier "<me.bsky.social>"
-                                           :password "SECRET"}}))
+(def client @(at/init {:credentials {:identifier "<me.bsky.social>"
+                                     :password "SECRET"}}))
 
 ;; Issue a query with the client
 @(client/query client {:op :app.bsky.actor.getProfile

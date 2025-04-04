@@ -10,7 +10,7 @@
             [atproto.data.json :as atproto-json]
             [atproto.lexicon :as lexicon]))
 
-(defn create
+(defn init
   [{:keys [lexicon validate-response?] :as config}]
   (lexicon/register-specs! lexicon)
   config)
@@ -78,7 +78,7 @@
 
 (defn http-request->xrpc-request
   "Validate the HTTP request and return the NSID if valid and found in the lexicon."
-  [lexicon {:keys [method url query-params headers body app-ctx]}]
+  [lexicon {:keys [method url query-params headers body]}]
   (let [nsid (subs (:path (http/parse-url url))
                    (count "/xrpc/"))
         type-def (lexicon/type-def lexicon nsid)]
@@ -100,10 +100,7 @@
 
                                  (some? input)
                                  (assoc :encoding (:content-type headers)
-                                        :body body)
-
-                                 app-ctx
-                                 (assoc :app-ctx app-ctx))
+                                        :body body))
                   spec-key (lexicon/request-spec-key nsid)]
               (if (not (s/valid? spec-key xrpc-request))
                 (invalid-request (s/explain-str spec-key xrpc-request))
@@ -121,9 +118,9 @@
   The function must return a map with:
   :body      The response body: `::atproto/data` or `bytes`.
   :encoding  The encoding of the body (`application/json` for `::atproto/data`)"
-  :nsid)
+  (fn [app-ctx request] (:nsid request)))
 
-(defmethod handle :default [_] (method-not-implemented))
+(defmethod handle :default [_ _] (method-not-implemented))
 
 (defn interceptor
   "Handle HTTP requests and delegate execution to a `handle` method after parsing/validation."
@@ -133,9 +130,10 @@
                (assoc ctx
                       ::i/response
                       (let [xrpc-request (http-request->xrpc-request lexicon request)]
+                        (cast/dev xrpc-request)
                         (if (:error xrpc-request)
                           xrpc-request
-                          (let [xrpc-response (handle xrpc-request)]
+                          (let [xrpc-response (handle (:app-ctx request) xrpc-request)]
                             (if (:error xrpc-response)
                               xrpc-response
                               (or (when validate-response?
@@ -161,6 +159,9 @@
                             :body body}))))})
 
 (defn handle-http-request
+  "Handle an HTTP request and delegate execution to the API implementation.
+
+  The `http-request` accepts an extra key `:app-ctx` that will be passed to the handle method."
   [server http-request & {:as opts}]
   (i/execute {::i/request http-request
               ::i/queue [json/server-interceptor
