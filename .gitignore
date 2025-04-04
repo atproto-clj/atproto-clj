@@ -22,9 +22,11 @@ pom.xml.asc
 /samples
 
 resources/dev-config.edn
-src/atproto/scratch.clj
 
 dev/
 config.edn
 *.db
 .dir-locals.el
+.env
+
+examples/statusphere/resources/public/js

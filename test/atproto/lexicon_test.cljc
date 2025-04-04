@@ -9,12 +9,6 @@
   #?(:cljs (:require-macros [atproto.lexicon-test :refer [interop-test-cases]])))
 
 ;; -----------------------------------------------------------------------------
-;; Schema validation
-;; -----------------------------------------------------------------------------
-
-;; todo
-
-;; -----------------------------------------------------------------------------
 ;; Translator
 ;; -----------------------------------------------------------------------------
 
@@ -292,8 +286,8 @@
     {:type "object"
      :properties {:int {:type "integer"}
                   :string {:type "string"}}
-     :required [:int]
-     :nullable [:string]
+     :required ["int"]
+     :nullable ["string"]
      ::valid [{:int 0}
               {:int 0 :string "foobar"}
               {:int 0 :string nil}]
@@ -309,7 +303,7 @@
     {:type "params"
      :properties {:a {:type "boolean"}
                   :b {:type "string"}}
-     :required [:a]
+     :required ["a"]
      ::valid [{:a true}
               {:a false :b "foobar"}]
      ::invalid [{}
@@ -379,7 +373,7 @@
   [schema]
   (let [schema-valid? (s/valid? :atproto.lexicon.schema/file schema)]
     (when (is schema-valid? "The test schema is valid.")
-      (eval `(do ~@(lexicon/translate (s/conform :atproto.lexicon.schema/file schema)))))))
+      (eval `(do ~@(lexicon/translate schema))))))
 
 (deftest test-translator
   (when (translate-and-register-specs! schema)
@@ -390,4 +384,4 @@
               (str "\"" valid "\" is a valid " spec-key)))
         (doseq [invalid (::invalid def)]
           (is (not (s/valid? spec-key invalid))
-              (str "\"" invalid "\" is not a valid " spec-key)))))))
+              (str "[" invalid "] is not a valid " spec-key)))))))

@@ -24,3 +24,7 @@
   #?(:clj (try
             (OffsetDateTime/parse (trim-fraction s) datetime-formatter)
             (catch DateTimeParseException _))))
+
+(defn current-time-millis
+  []
+  #?(:clj (System/currentTimeMillis)))

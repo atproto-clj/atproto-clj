@@ -8,30 +8,49 @@
             [atproto.runtime.http :as http]
             [atproto.runtime.crypto :as crypto]
             [atproto.runtime.jwt :as jwt]
+            [atproto.runtime.cast :as cast]
             [atproto.identity :as identity]
-            [atproto.session :as session]
+            [atproto.xrpc.client :as xrpc-client]
             [atproto.oauth.client.dpop :as dpop]
             [atproto.oauth.client.store :as store]))
 
 ;; todo:
 ;; - implement (auto-)refresh
 
-;; OAuth session
+;; -----------------------------------------------------------------------------
+;; OAuth session for the XRPC client
+;; -----------------------------------------------------------------------------
 
 (declare refresh-session auth-interceptor)
 
 (defn- oauth-session
-  "Create a OAuth session that can be used with `atproto.client`."
+  "Create a OAuth session that can be used with `xrpc.client`."
   [client {:keys [did handle did-doc tokens dpop-key] :as data}]
-  (let [creds (select-keys data [:tokens :dpop-key])]
-    (with-meta
-      (cond-> #::session{:service (identity/did-doc-pds did-doc)
-                         :authenticated? true
-                         :refreshable? true}
-        did (assoc ::session/did did)
-        handle (assoc ::session/handle handle))
-      {`session/auth-interceptor (fn [_] (auth-interceptor client creds))
-       `session/refresh-session (fn [_] (refresh-session client creds))})))
+  (with-meta
+    (cond-> {:pds (identity/did-doc-pds did-doc)
+             :did did
+             :tokens tokens
+             :dpop-key dpop-key}
+      handle (assoc :handle handle))
+    {`xrpc-client/auth-interceptor #(auth-interceptor client %)
+     `xrpc-client/refresh-token #(refresh-session client %1 %2)}))
+
+(defn auth-interceptor
+  [client {:keys [tokens dpop-key]}]
+  (let [{:keys [client_id]} (:client-metadata client)
+        {:keys [token_type access_token]} tokens]
+    {::i/name ::auth-interceptor
+     ::i/enter (fn [ctx]
+                 (-> ctx
+                     (assoc-in [::i/request :headers :authorization]
+                               (str token_type " " access_token))
+                     (update ::i/queue #(cons (dpop/interceptor {:iss client_id
+                                                                 :dpop-key dpop-key})
+                                              %))))}))
+
+;; -----------------------------------------------------------------------------
+;; OAuth client
+;; -----------------------------------------------------------------------------
 
 ;; atproto clients and servers must support ES256
 (def default-alg "ES256")
@@ -65,7 +84,8 @@
   [server cb]
   (i/execute {::i/request {:method :get
                            :url (str server "/.well-known/oauth-protected-resource")}
-              ::i/queue [json/interceptor http/interceptor]}
+              ::i/queue [json/client-interceptor
+                         http/client-interceptor]}
              :callback (fn [{:keys [error body] :as resp}]
                          (cb (if error resp body)))))
 
@@ -74,7 +94,8 @@
   [server cb]
   (i/execute {::i/request {:method :get
                            :url (str server "/.well-known/oauth-authorization-server")}
-              ::i/queue [json/interceptor http/interceptor]}
+              ::i/queue [json/client-interceptor
+                         http/client-interceptor]}
              :callback (fn [{:keys [error body] :as resp}]
                          (cb (if error resp body)))))
 
@@ -185,6 +206,7 @@
                                          :app-state (:state opts)})
                              {:method :post
                               :url pushed_authorization_request_endpoint
+                              :headers {:content-type "application/json"}
                               :body (merge oauth-params
                                            (client-auth client issuer))}))))
 
@@ -234,8 +256,8 @@
                                  ::i/queue [(par-interceptor client server)
                                             (dpop/interceptor {:iss client_id
                                                                :dpop-key (:dpop-key server)})
-                                            json/interceptor
-                                            http/interceptor]}
+                                            json/client-interceptor
+                                            http/client-interceptor]}
                                 :callback cb))))))
     val))
 
@@ -247,6 +269,7 @@
         {:keys [token_endpoint]} issuer]
     (i/execute {::i/request {:method :post
                              :url token_endpoint
+                             :headers {:content-type "application/json"}
                              :body (merge {:grant_type "authorization_code"
                                            :redirect_uri (first redirect_uris)
                                            :code code
@@ -255,8 +278,8 @@
                              :dpop-key dpop-key}
                 ::i/queue [(dpop/interceptor {:iss client_id
                                               :dpop-key dpop-key})
-                           json/interceptor
-                           http/interceptor]}
+                           json/client-interceptor
+                           http/client-interceptor]}
                :callback
                (fn [{:keys [error status body] :as http-response}]
                  (cond
@@ -347,21 +370,5 @@
     val))
 
 (defn refresh-session
-  [client creds]
+  [client session cb]
   'todo)
-
-(defn auth-interceptor
-  [client creds]
-  (let [{:keys [client_id]} (:client-metadata client)
-        {:keys [tokens dpop-key]} creds
-        {:keys [token_type access_token]} tokens]
-    {::i/name ::auth-interceptor
-     ::i/enter (fn [ctx]
-                 (-> ctx
-                     (assoc-in [::i/request :headers :authorization]
-                               (str token_type " " access_token))
-                     (update ::i/queue #(cons (dpop/interceptor {:iss client_id
-                                                                 :dpop-key dpop-key})
-                                              %))))
-     ::i/leave (fn [ctx]
-                 ctx)}))

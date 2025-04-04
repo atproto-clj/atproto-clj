@@ -1,8 +1,9 @@
-(ns statusphere.auth
+(ns xyz.statusphere.auth
   (:require [next.jdbc :as jdbc]
             [next.jdbc.sql :as sql]
             [atproto.oauth.client :as oauth-client]
-            [atproto.oauth.client.store :as store])
+            [atproto.oauth.client.store :as store]
+            [xyz.statusphere.db :as db])
   (:import [java.net URLEncoder]))
 
 (defn state-store
@@ -34,14 +35,12 @@
       (sql/delete! db :auth_session {:key key}))))
 
 (defn client
-  [env db]
-  (let [url (or (:public-url env)
-                (str "http://127.0.0.1:" (:port env)))
-        redirect-uri (str url "/oauth/callback")
+  [{:keys [public-url url keyset] :as config}]
+  (let [redirect-uri (str url "/oauth/callback")
         scope "atproto transition:generic"
-        client-id (if (:public-url env)
+        client-id (if public-url
                     ;; In production, the client-metadata must be served at /client-metadata.json"
-                    (str (:public-url env) "/client-metadata.json")
+                    (str public-url "/client-metadata.json")
                     ;; During development the client-metadata is provided inline in the client_id
                     (format "http://localhost?redirect_uri=%s&scope=%s"
                             (URLEncoder/encode redirect-uri)
@@ -57,6 +56,6 @@
                         :application_type "web"
                         :token_endpoint_auth_method "none" ;; "private_key_jwt"
                         :dpop_bound_access_tokens true}
-      :keys (:keyset env)
-      :state-store (state-store db)
-      :session-store (session-store db)})))
+      :keys keyset
+      :state-store (state-store db/db)
+      :session-store (session-store db/db)})))

@@ -4,11 +4,11 @@
             [atproto.runtime.interceptor :as i]
             [atproto.runtime.jwt :as jwt]
             [atproto.runtime.http :as http]
-            [atproto.runtime.crypto :as crypto]))
+            [atproto.runtime.crypto :as crypto]
+            [atproto.runtime.cast :as cast]))
 
-;; todo: where to store this? 1 per origin?
 ;; host -> nonce
-(def nonce-store (atom {}))
+(defonce nonce-store (atom {}))
 
 ;; atproto clients and servers must support ES256
 (def default-alg "ES256")
@@ -20,9 +20,9 @@
   [{:keys [iss dpop-key]}]
   (fn [{:keys [::i/request] :as ctx}]
     (let [{:keys [server-nonce method url headers]} request
-          url-map (http/parse-url url)
+          host (:host (http/parse-url url))
           nonce (or server-nonce
-                    (get @nonce-store (:host url-map)))
+                    (get @nonce-store host))
           ath (when-let [auth (:authorization headers)]
                 (when (str/starts-with? auth "DPoP ")
                   (crypto/base64url-encode
@@ -35,14 +35,14 @@
                               {:iss iss
                                :jti (crypto/generate-nonce 12)
                                :htm (str/upper-case (name method))
-                               :htu (http/serialize-url (dissoc url-map :query-params :fragment))
+                               :htu url
                                :iat (crypto/now)
                                :nonce nonce
                                :ath ath})]
       (-> ctx
           (update ::i/request assoc-in [:headers :dpop] proof)
           (assoc ::original-ctx ctx)
-          (assoc ::origin (:host url-map))
+          (assoc ::origin host)
           (assoc ::nonce nonce)))))
 
 (defn- use-dpop-nonce-error?
@@ -70,5 +70,7 @@
                    ;; retry if server asks to use their nonce
                    (if (and (use-dpop-nonce-error? response)
                             (not (:server-nonce (::i/request original-ctx))))
-                     (i/continue (wrap-dpop (assoc-in original-ctx [::i/request :server-nonce] (:dpop-nonce headers))))
+                     (i/continue (wrap-dpop (assoc-in original-ctx
+                                                      [::i/request :server-nonce]
+                                                      (:dpop-nonce headers))))
                      (dissoc ctx ::original-ctx ::origin ::nonce))))}))

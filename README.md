@@ -1,48 +1,87 @@
-# atproto Clojure SDK
+# ATProto Clojure SDK
 
-Work very much in progress
+The SDK was designed to work in Clojure, ClojureScript, and ClojureDart.
 
-Multi-platform codebase designed to work in Clojure, ClojureScript and ClojureDart.
+> [!CAUTION]
+> Work very much in progress. Do not use in production. The API will likely change before the first release.
+
+## Progress
+
+From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-social/atproto/discussions/2415):
+
+| Component           | Clojure | ClojureScript | ClojureDart |
+| ------------------- | ------- | ------------- | ----------- |
+| *Basic*             | | | |
+| API Client          | 🟡 | 🟡 | ❓ |
+| Lexicon Types       | 🟡 | 🟡 | 🟡 |
+| Identifier Syntax   | 🟡 | 🟡 | ❓ |
+| *Protocol + Data*   | | | |
+| Keys and Crypto     | 🟢 | ⭕ | ⭕ |
+| MST and Repo        | ⭕ | ⭕ | ⭕ |
+| Data model          | 🟡 (no CBOR) | 🟡 (no CBOR) | ❓ |
+| Lex Validation      | 🟢 | 🟢 | ❓ |
+| Identity Resolution | 🟡 | 🟡 | 🟡 |
+| Stream client       | 🚧 (Jetstream only) | ⭕ | ⭕ |
+| Service Auth        | 🚧 | 🚧 | ❓ |
+| Lex Codegen         | N/A | N/A | N/A |
+| PLC Operations      | ⭕ | ⭕ | ⭕ |
+| OAuth Backend       | ⭕ | ⭕ | ⭕ |
+| *Service Pieces*    | | | |
+| HTTP Server         | 🟡 | ⭕ | ⭕ |
+| Identity Directory  | ⭕ | ⭕ | ⭕ |
+| Repo Storage        | ⭕ | ⭕ | ⭕ |
+| Stream Server       | ⭕ | ⭕ | ⭕ |
+
+- ✅ great! complete, documented, examples, accessible to new devs with no atproto experience
+- 🟢 decent. mostly implemented, could point experienced devs at it
+- 🟡 partial progress: incomplete, undocumented, not ergonomic
+- 🚧 early work in progress, but not usable yet
+- ⭕ nothing started
+- 🟣 something exists; not assessed
+- ❓ unknown (need to check status)
+
+We're not currently planning on supporting Bluesky-specific functionalities: post helpers, social graph helpers, label behaviors, preferences.
 
 ## Usage
 
-### ATProto Client
-
-The workflow for utilizing the client is to:
-
-1. Obtain a session by specifying the ATProto endpoint and (optionally) authentication credentials.
-2. Use the session to make query or procedure calls to ATProto or Bluesky endpoints.
-
-The SDK supports three types of session:
-1. Unauthenticated sessions to make API calls to public atproto application endpoints like [Bluesky](https://docs.bsky.app/docs/category/http-reference).
-2. Credentials sessions to use with your own username/password for CLI tools.
-3. OAuth sessions to connect to your users' Personal Data Servers and make API calls on their behalf.
-
-`query` and `procedure` calls use the "NSID" of the query or procedure, and a Clojure map of parameters.
-
-All calls (including the call to `create`) are asynchronous, and return immediately. The return value depends on platform:
+Most calls to the APIs are asynchronous, and return immediately. The return value depends on the platform:
 
 - Clojure: a Clojure promise.
 - ClojureScript: a core.async channel.
 - ClojureDart: a Dart Watchable.
 
-You can also provide a `:channel`, `:callback` or `:promise` keyword option to recieve the return value. Not all options are supported on all platforms.
+You can also provide a `:channel`, `:callback` or `:promise` keyword option to receive the return value. Not all options are supported on all platforms.
+
+### ATProto Client
+
+The ATProto client supports 3 authentication modes:
+- Unauthenticated to make query/procedure calls to public ATProto endpoints
+- Credentials-based authentication to use with your own username/password for CLI tools
+- OAuth to make query/procedure calls on your users' behalf.
+
+You specify the mode when initializing the client.
 
 ```clojure
-(require '[atproto.client :as client])
+(require '[atproto.client :as at])
 
 ;; Unauthenticated client to public endpoint
-(def client @(client/create {:service "https://public.api.bsky.app"}))
+(def client @(at/init {:service "https://public.api.bsky.app"}))
 
 ;; Bluesky endpoints and their query params can be found here:
 ;; https://docs.bsky.app/docs/category/http-reference
 
 ;; Credentials-based authenticated client
-(def client @(client/create {:credentials {:identifier "<me.bsky.social>"
-                                           :password "SECRET"}}))
+(def client @(at/init {:credentials {:identifier "<me.bsky.social>"
+                                     :password "SECRET"}}))
 
+;; For OAuth, see the Statusphere example app
+```
+
+Once the client has been initialized, `query` and procedure `calls` can be made against the ATProto service endpoint.
+
+```clojure
 ;; Issue a query with the client
-@(client/query client {:op :app.bsky.actor.getProfile
+@(at/query client {:nsid "app.bsky.actor.getProfile"
                    :params {:actor "<me.bsky.social>"}})
 
 ;; => {:handle "<me.bsky.social>" ... }
@@ -50,11 +89,13 @@ You can also provide a `:channel`, `:callback` or `:promise` keyword option to r
 ;; Using core.async
 (def result (async/chan))
 (at/query client
-          {:op :app.bsky.actor.getProfile
+          {:nsid "app.bsky.actor.getProfile"
            :params {:actor "<me.bsky.social>"}}
           :channel result)
 (async/<!! result)
 ```
+
+If an error occurs, the response map will contain an `:error` key containing a short name describing the error. A human-readable message is usually added as well under the `:message` key.
 
 ### Jetstream
 
@@ -84,11 +125,24 @@ The Jetstream implementation is currently only supported for JVM Clojure.
 (a/close! control-ch)
 ```
 
-## References
+## SDK Organization
 
-- [Existing SDKs](https://atproto.com/sdks)
-- [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-social/atproto/discussions/2415)
-- [atproto Interop Test Files](https://github.com/bluesky-social/atproto-interop-tests)
+The platform-specific functions are under the `atproto.runtime` namespace. Most of the rest of the code is platform-agnostic.
+
+| Namespace      | Purpose |
+| -------------- | ------- |
+| `client`       | ATProto client to make query and procedure calls to ATProto services. |
+| `credentials`  | Credentials-based session to use with the ATProto client. |
+| `oauth.client` | OAuth 2.0 client for ATProto profile. Create a session that can be used with the ATProto client. |
+| `data`         | ATProto data model. |
+| `data.json`    | JSON-representation of the ATProto data model. |
+| `identity`     | Identity resolution (handles and DIDs). |
+| `jetstream`    | Clojure client for Bluesky's Jetstream service. |
+| `lexicon`      | Schema definition and validation functions for records, queries, and procedure calls. |
+| `runtime`      | Runtime-specific functions. |
+| `tid`          | Timestamp identifiers for records. |
+| `xrpc.client`  | To make queries and procedure calls to XRPC servers. |
+| `xrpc.server`  | To implement XRPC servers. |
 
 ## Contribute
 

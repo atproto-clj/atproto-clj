@@ -9,7 +9,8 @@
         com.google.crypto.tink/tink {:mvn/version "1.7.0"}
         mvxcvi/multiformats {:mvn/version "1.0.125"}}
  :aliases {:dev  {:extra-paths ["test" "dev" "examples"]
-                  :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}}}
+                  :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}}
+                  :jvm-opts ["-Datproto.runtime.cast.dev-enabled=true"]}
            :test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "0.9.0"}
                                io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
