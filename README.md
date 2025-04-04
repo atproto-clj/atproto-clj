@@ -125,6 +125,8 @@ The Jetstream implementation is currently only supported for JVM Clojure.
 (a/close! control-ch)
 ```
 
+See the [examples](/examples) directory for more examples.
+
 ## SDK Organization
 
 The platform-specific functions are under the `atproto.runtime` namespace. Most of the rest of the code is platform-agnostic.
