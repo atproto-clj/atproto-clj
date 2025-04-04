@@ -12,7 +12,7 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | Component           | Clojure | ClojureScript | ClojureDart |
 | ------------------- | ------- | ------------- | ----------- |
 | **Basic**           | | | |
-| API Client          | 🟢 | 🟢 | ❓ |
+| API Client          | 🟢 | 🟢 | 🟡 |
 | Lexicon Types       | 🟢 | 🟢 | 🟢 |
 | Identifier Syntax   | 🟢 | 🟢 | 🟢 |
 | **Protocol + Data** | | | |
@@ -20,8 +20,8 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | MST and Repo        | ⭕ | ⭕ | ⭕ |
 | Data model          | 🟡 (no CBOR) | 🟡 (no CBOR) | ❓ |
 | Lex Validation      | 🟢 | 🟢 | ❓ |
-| Identity Resolution | 🟡 | 🟡 | 🟡 |
-| Stream client       | 🟡 (Jetstream only) | ⭕ | ⭕ |
+| Identity Resolution | 🟢 | 🟢 | ❓ |
+| Stream client       | 🟢 (Jetstream only) | ⭕ | ⭕ |
 | Service Auth        | 🟡 | 🟡 | ❓ |
 | Lex Codegen         | N/A | N/A | N/A |
 | PLC Operations      | ⭕ | ⭕ | ⭕ |
