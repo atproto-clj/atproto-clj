@@ -4,16 +4,11 @@
   See https://atproto.com/specs/tid"
   (:require [clojure.math :refer [floor random]]
             [clojure.spec.alpha :as s]
+            [atproto.runtime.datetime :refer [current-time-millis]]
             #?(:clj [clojure.pprint :refer [cl-format]]
                :cljs [cljs.pprint :refer [cl-format]])))
 
 (def s32-chars "234567abcdefghijklmnopqrstuvwxyz")
-
-(def regexp (re-pattern (str "^[" s32-chars "]{13}$")))
-
-(s/def :atproto/tid
-  (s/and string?
-         #(re-find regexp %)))
 
 (defn- left-pad
   [s len ch]
@@ -28,10 +23,6 @@
       (recur (floor (/ n 32))
              (cons (.charAt s32-chars (mod n 32)) s)))))
 
-(def ^:private timestamp-ms
-  "Current timestamp in milliseconds."
-  #?(:clj System/currentTimeMillis))
-
 (def ^:private last-timestamp-ms (atom 0))
 
 (defn- monotime-ms
@@ -39,7 +30,7 @@
   []
   (swap! last-timestamp-ms
          (fn [last-ts]
-           (let [ts (timestamp-ms)]
+           (let [ts (current-time-millis)]
              (if (< last-ts ts)
                ts
                (+ 1 last-ts))))))

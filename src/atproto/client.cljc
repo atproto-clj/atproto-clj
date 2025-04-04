@@ -81,7 +81,7 @@
 (defn query
   "Issue a query against the server with the given parameters.
 
-  The `reuqest` map accepts the following keys:
+  The `request` map accepts the following keys:
   :nsid      NSID of the query, `string`, required.
   :params    Query parameters, `map`, optional."
   [client request & {:as opts}]

@@ -4,7 +4,6 @@
   The core \"data model\" supports both binary (CBOR) and textual (JSON) representations.
 
   See https://atproto.com/specs/data-model"
-  #?(:clj (:refer-clojure :exclude [format]))
   (:require [clojure.math :as math]
             [clojure.spec.alpha :as s]
             [multiformats.cid :as cid]
