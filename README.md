@@ -1,6 +1,6 @@
 # ATProto Clojure SDK
 
-The SDK was designed to work in Clojure, ClojureScript, and ClojureDart.
+The [ATProto](https://atproto.com) Clojure SDK was designed to work in Clojure, ClojureScript, and ClojureDart.
 
 > [!CAUTION]
 > Work very much in progress. Do not use in production. The API will likely change before the first release.
