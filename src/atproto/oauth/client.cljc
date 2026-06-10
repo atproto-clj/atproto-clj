@@ -97,13 +97,20 @@
      :state-store (or state-store (store/memory-store))
      :session-store (or session-store (store/memory-store))}))
 
+;; How long fetched authorization-server metadata may be reused, in seconds.
+(def issuer-metadata-ttl 60)
+
 (defn- set-issuer!
   [client iss metadata]
-  (swap! (:issuers client) assoc iss metadata))
+  (swap! (:issuers client) assoc iss {:metadata metadata
+                                      :expires-at (+ (crypto/now) issuer-metadata-ttl)}))
 
 (defn- get-issuer
+  "The cached authorization-server metadata for `iss`, if still fresh."
   [client iss]
-  (get @(:issuers client) iss))
+  (when-let [{:keys [metadata expires-at]} (get @(:issuers client) iss)]
+    (when (< (crypto/now) expires-at)
+      metadata)))
 
 (defn- after-delay
   "Invoke f after ms milliseconds, off the calling thread."
@@ -137,10 +144,10 @@
 (defn- issuer-metadata
   "The authorization-server metadata for `iss`.
 
-  Returns the cached entry, or fetches it from
-  <iss>/.well-known/oauth-authorization-server, validates that the metadata's
-  issuer matches, and caches it. Makes refresh/revoke work after a process
-  restart, when the in-memory issuer cache is empty."
+  Returns the cached entry (fresh for `issuer-metadata-ttl`), or fetches it
+  from <iss>/.well-known/oauth-authorization-server, validates that the
+  metadata's issuer matches, and caches it. Makes refresh/revoke/callback
+  work after a process restart, when the in-memory issuer cache is empty."
   [client iss cb]
   (if-let [metadata (get-issuer client iss)]
     (cb metadata)
@@ -418,7 +425,6 @@
 
   Return a map with:
   :state    The local state stored for this session.
-  :issuer   The issuer for this request.
   :error    In case of an error."
   [client {:keys [response iss state error code] :as params}]
   (let [saved-state (store/get (:state-store client) state)]
@@ -443,8 +449,7 @@
                :state saved-state}
 
               :else
-              {:state saved-state
-               :issuer (get-issuer client iss)})))))
+              {:state saved-state})))))
 
 (defn callback
   "Exchange the authorization code for OAuth tokens and return a OAuth session.
@@ -459,43 +464,76 @@
   :state    The app state passed in authorize, if any."
   [client params & {:as opts}]
   (let [[cb val] (i/platform-async opts)
-        {:keys [error state issuer] :as resp} (validate-callback-params client params)]
+        {:keys [error state] :as resp} (validate-callback-params client params)]
     (if error
       (cb resp)
-      (let [{:keys [verifier dpop-key app-state identity]} state
-            server {:issuer issuer
-                    :dpop-key dpop-key}]
-        (exchange-code client server {:code (:code params)
-                                      :verifier verifier}
-                       (fn [{:keys [error] :as resp}]
-                         (if error
-                           (cb resp)
-                           (let [did (:sub resp)
-                                 iss (:issuer issuer)
-                                 session-data (merge identity
-                                                     {:did did
-                                                      :iss iss
-                                                      :tokens (tokens+expiry iss (:aud resp) resp)
-                                                      :dpop-key dpop-key})
-                                 store-session! (fn []
-                                                  (store/set (:session-store client) did session-data)
-                                                  (cb (cond-> {:session (oauth-session client session-data)}
-                                                        app-state (assoc :state app-state))))]
-                             ;; revoke any pre-existing session for the same DID
-                             (if-let [existing (store/get (:session-store client) did)]
-                               (revoke-tokens client existing (fn [_] (store-session!)))
-                               (store-session!))))))))
+      (let [{:keys [verifier dpop-key app-state identity]} state]
+        (issuer-metadata
+         client (:iss state)
+         (fn [{:keys [error] :as issuer}]
+           (if error
+             (cb issuer)
+             (let [server {:issuer issuer
+                           :dpop-key dpop-key}]
+               (exchange-code client server {:code (:code params)
+                                             :verifier verifier}
+                              (fn [{:keys [error] :as resp}]
+                                (if error
+                                  (cb resp)
+                                  (let [did (:sub resp)
+                                        iss (:issuer issuer)
+                                        session-data (merge identity
+                                                            {:did did
+                                                             :iss iss
+                                                             :tokens (tokens+expiry iss (:aud resp) resp)
+                                                             :dpop-key dpop-key})
+                                        store-session! (fn []
+                                                         (store/set (:session-store client) did session-data)
+                                                         (cb (cond-> {:session (oauth-session client session-data)}
+                                                               app-state (assoc :state app-state))))]
+                                    ;; revoke any pre-existing session for the same DID
+                                    (if-let [existing (store/get (:session-store client) did)]
+                                      (revoke-tokens client existing (fn [_] (store-session!)))
+                                      (store-session!))))))))))))
     val))
+
+;; Tokens are considered stale this many seconds before :expires-at, plus a
+;; random jitter to spread refreshes across concurrent instances.
+(def token-expiry-leeway 10)
+(def token-expiry-jitter 30)
+
+(defn- stale-tokens?
+  "True when these tokens are expired or about to expire. Tokens without
+  :expires-at (legacy rows) are never considered stale."
+  [{:keys [expires-at]}]
+  (boolean
+   (and expires-at
+        (< expires-at (+ (crypto/now)
+                         token-expiry-leeway
+                         (rand-int token-expiry-jitter))))))
 
 (defn restore
   "The OAuth session for this did.
 
   Resolves to the session or {:error \"SessionNotFound\" :did did}.
-  Tolerates legacy stored sessions without :iss/:expires-at."
-  [client did & {:as opts}]
-  (let [[cb val] (i/platform-async opts)]
+
+  The :refresh option controls token freshness:
+  :auto (default)  refresh first when the stored tokens are expired or about
+                   to expire (see `stale-tokens?`)
+  true             always refresh first
+  false            return the stored tokens as-is, even if expired
+
+  Tolerates legacy stored sessions without :iss/:expires-at (never refreshed
+  proactively, only on an invalid-token response)."
+  [client did & {:keys [refresh] :or {refresh :auto} :as opts}]
+  (let [[cb val] (i/platform-async (dissoc opts :refresh))]
     (if-let [session-data (store/get (:session-store client) did)]
-      (cb (oauth-session client session-data))
+      (if (case refresh
+            true true
+            false false
+            (stale-tokens? (:tokens session-data)))
+        (refresh-session client {:did did} cb)
+        (cb (oauth-session client session-data)))
       (cb {:error "SessionNotFound" :did did}))
     val))
 
@@ -524,15 +562,17 @@
                (store/del session-store did))
              (cb {:error "TokenRefreshError"
                   :message (or error_description "The refresh token grant was rejected.")
-                  :did did})))))))
+                  :did did
+                  ::xrpc-client/session-expired? true})))))))
 
 (defn- run-refresh
   "Perform the refresh_token grant for the stored session of this DID.
 
   cb receives a new session (satisfying xrpc-client/Session) or {:error ...}.
-  Definitive failures delete the stored session; transient failures (network,
-  5xx) leave it in place. The refreshed tokens are persisted via store/set
-  before the new session is delivered."
+  Definitive failures delete the stored session and are tagged with
+  :atproto.xrpc.client/session-expired? so XRPC clients drop the dead session;
+  transient failures (network, 5xx) leave it in place. The refreshed tokens
+  are persisted via store/set before the new session is delivered."
   [client did cb]
   (let [session-store (:session-store client)
         stored (store/get session-store did)]
@@ -540,13 +580,15 @@
       (not stored)
       (cb {:error "TokenRefreshError"
            :message "Session deleted."
-           :did did})
+           :did did
+           ::xrpc-client/session-expired? true})
 
       (not (get-in stored [:tokens :refresh_token]))
       (do (store/del session-store did)
           (cb {:error "TokenRefreshError"
                :message "No refresh token available."
-               :did did}))
+               :did did
+               ::xrpc-client/session-expired? true}))
 
       :else
       ;; Re-verify the issuer for this DID before using the refresh token.
@@ -561,7 +603,8 @@
                    (do (store/del session-store did)
                        (cb {:error "TokenRefreshError"
                             :message "Issuer mismatch."
-                            :did did}))
+                            :did did
+                            ::xrpc-client/session-expired? true}))
 
                    :else
                    (let [iss (or (:iss stored) iss)
@@ -579,10 +622,12 @@
                            (fn [{:keys [error] :as token-resp}]
                              (cond
                                (not error)
+                               ;; pin :sub to the session's DID; the token
+                               ;; response's sub is not re-validated here
                                (let [session-data (merge stored
                                                          {:iss iss
                                                           :did-doc (:did-doc identity)
-                                                          :tokens (tokens+expiry iss aud (update token-resp :sub #(or % did)))}
+                                                          :tokens (tokens+expiry iss aud (assoc token-resp :sub did))}
                                                          (when (:handle identity)
                                                            {:handle (:handle identity)}))]
                                  (store/set session-store did session-data)

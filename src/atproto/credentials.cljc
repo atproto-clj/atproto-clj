@@ -63,12 +63,26 @@
                                    (xrpc-create-session identity credentials cb))))
     val))
 
+(defn- session-killing-error?
+  "True when this refreshSession failure means the session is definitively
+  dead (HTTP 401, ExpiredToken, InvalidToken). Network and other transient
+  errors return false."
+  [{:keys [error http-response]}]
+  (boolean
+   (or (contains? #{"ExpiredToken" "InvalidToken"} error)
+       (= 401 (:status http-response)))))
+
 (defn- xrpc-refresh-session
   "Session protocol impl. POSTs com.atproto.server.refreshSession through a
   refresh-mode XRPC client. cb receives the rebuilt session (new
   accessJwt/refreshJwt, metadata reattached) or {:error ...}. Delivers
   {:error \"InvalidDID\" ...} if the response :did differs from the current
-  session's."
+  session's.
+
+  Definitive failures (HTTP 401, InvalidDID, ExpiredToken, InvalidToken) are
+  tagged with :atproto.xrpc.client/session-expired? so the XRPC client drops
+  the dead session; transient failures (e.g. network errors) leave it in
+  place."
   [sess cb]
   (xrpc-client/procedure (refresh-client sess)
                          {:nsid "com.atproto.server.refreshSession"}
@@ -76,12 +90,15 @@
                          (fn [{:keys [error] :as resp}]
                            (cond
                              error
-                             (cb resp)
+                             (cb (cond-> resp
+                                   (session-killing-error? resp)
+                                   (assoc ::xrpc-client/session-expired? true)))
 
                              (and (:did sess) (not= (:did sess) (:did resp)))
                              (cb {:error "InvalidDID"
                                   :message "The DID changed across the session refresh."
-                                  :did (:did resp)})
+                                  :did (:did resp)
+                                  ::xrpc-client/session-expired? true})
 
                              :else
                              (cb (session sess resp))))))
