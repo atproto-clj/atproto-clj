@@ -46,7 +46,8 @@
               :session session)))
 
    (POST "/logout" req
-     ;; todo: destroy oauth session
+     (when-let [did (get-in req [:session :did])]
+       @(oauth-client/revoke (:oauth-client (:app-ctx req)) did))
      (assoc (r/redirect "/")
             :session nil))
 
