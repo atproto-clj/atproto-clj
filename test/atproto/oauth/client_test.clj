@@ -41,6 +41,19 @@
                                    :redirect_uris ["https://app.test/oauth/callback"]
                                    :scope "atproto"}}))
 
+(defn- tokens
+  "A stored token map with a future expiry, merged with `overrides`."
+  [& [overrides]]
+  (merge {:access_token "at-1"
+          :refresh_token "rt-1"
+          :token_type "DPoP"
+          :scope "atproto"
+          :sub did
+          :aud pds
+          :iss issuer
+          :expires-at (+ (crypto/now) 3600)}
+         overrides))
+
 (defn- seed-session!
   "Store a session for `did` and return the session data (with the dpop-key)."
   [client & [overrides]]
@@ -50,14 +63,7 @@
                              :did-doc did-doc
                              :iss issuer
                              :dpop-key dpop-key
-                             :tokens {:access_token "at-1"
-                                      :refresh_token "rt-1"
-                                      :token_type "DPoP"
-                                      :scope "atproto"
-                                      :sub did
-                                      :aud pds
-                                      :iss issuer
-                                      :expires-at 0}}
+                             :tokens (tokens)}
                             overrides)]
     (store/set (:session-store client) did session-data)
     session-data))
@@ -135,6 +141,49 @@
           (is (= "at-2" (get-in s2 [:tokens :access_token])))
           (is (= 1 (count (requests-to requests "/token")))))))))
 
+(deftest refresh-pins-sub-test
+  ;; the token response's sub is not adopted: the stored sub stays pinned to
+  ;; the session's DID (matching the reference, which ignores it on refresh)
+  (let [client (test-client)
+        _ (seed-session! client)
+        {:keys [handler]} (fake-http/routed
+                           (conj resolution-routes
+                                 ["/token" (fake-http/json-response
+                                            {:access_token "at-2"
+                                             :refresh_token "rt-2"
+                                             :token_type "DPoP"
+                                             :scope "atproto"
+                                             :sub "did:plc:zzzzzzzzzzzzzzzzzzzzzzzz"
+                                             :expires_in 300})]))]
+    (with-redefs [http/handle-request handler]
+      (let [session (deref (oauth/refresh client did) 5000 ::timeout)]
+        (is (nil? (:error session)))
+        (is (= did (get-in session [:tokens :sub])))
+        (is (= did (get-in (store/get (:session-store client) did) [:tokens :sub])))))))
+
+(deftest issuer-metadata-cache-ttl-test
+  ;; AS metadata is cached for issuer-metadata-ttl and re-fetched after that
+  (let [client (test-client)
+        {:keys [handler requests]} (fake-http/routed
+                                    [["/.well-known/oauth-authorization-server"
+                                      (fake-http/json-response asmd)]
+                                     ["/revoke" (fake-http/json-response {})]])
+        asmd-fetches #(count (requests-to requests "oauth-authorization-server"))]
+    (with-redefs [http/handle-request handler]
+      ;; first revoke fetches and caches the metadata, second hits the cache
+      (seed-session! client)
+      (is (= {:did did :revoked true} (deref (oauth/revoke client did) 5000 ::timeout)))
+      (is (= 1 (asmd-fetches)))
+      (seed-session! client)
+      (is (= {:did did :revoked true} (deref (oauth/revoke client did) 5000 ::timeout)))
+      (is (= 1 (asmd-fetches)))
+      ;; past the TTL the metadata is fetched again
+      (let [real-now crypto/now]
+        (with-redefs [crypto/now #(+ (real-now) (* 2 oauth/issuer-metadata-ttl))]
+          (seed-session! client)
+          (is (= {:did did :revoked true} (deref (oauth/revoke client did) 5000 ::timeout)))
+          (is (= 2 (asmd-fetches))))))))
+
 (deftest invalid-grant-adopts-foreign-refresh-test
   (let [client (test-client)
         seeded (seed-session! client)
@@ -168,6 +217,8 @@
       (let [resp (deref (oauth/refresh client did) 5000 ::timeout)]
         (is (= "TokenRefreshError" (:error resp)))
         (is (= "expired" (:message resp)))
+        ;; definitive failures are tagged so XRPC clients drop the session
+        (is (true? (:atproto.xrpc.client/session-expired? resp)))
         (is (nil? (store/get (:session-store client) did)))))))
 
 (deftest refresh-without-refresh-token-test
@@ -204,12 +255,51 @@
 
 (deftest restore-test
   (let [client (test-client)
-        _ (seed-session! client)]
-    (let [session (deref (oauth/restore client did) 1000 ::timeout)]
-      (is (nil? (:error session)))
-      (is (= did (:did session)))
-      (is (= pds (:pds session)))
-      (is (map? (xrpc-client/auth-interceptor session))))))
+        _ (seed-session! client)
+        {:keys [handler requests]} (fake-http/routed [])]
+    (with-redefs [http/handle-request handler]
+      (let [session (deref (oauth/restore client did) 1000 ::timeout)]
+        (is (nil? (:error session)))
+        (is (= did (:did session)))
+        (is (= pds (:pds session)))
+        (is (map? (xrpc-client/auth-interceptor session)))
+        ;; fresh tokens are returned as-is, without any network traffic
+        (is (empty? @requests))))))
+
+(deftest restore-refreshes-stale-tokens-test
+  ;; restore with the default :refresh :auto refreshes expired (or about to
+  ;; expire) tokens before returning the session
+  (let [client (test-client)
+        _ (seed-session! client {:tokens (tokens {:expires-at (crypto/now)})})
+        {:keys [handler requests]} (fake-http/routed
+                                    (conj resolution-routes
+                                          ["/token" token-success-response]))]
+    (with-redefs [http/handle-request handler]
+      (let [session (deref (oauth/restore client did) 5000 ::timeout)]
+        (is (nil? (:error session)))
+        (is (= "at-2" (get-in session [:tokens :access_token])))
+        (is (= 1 (count (requests-to requests "/token"))))))))
+
+(deftest restore-refresh-false-returns-stale-tokens-test
+  (let [client (test-client)
+        _ (seed-session! client {:tokens (tokens {:expires-at 0})})
+        {:keys [handler requests]} (fake-http/routed [])]
+    (with-redefs [http/handle-request handler]
+      (let [session (deref (oauth/restore client did :refresh false) 1000 ::timeout)]
+        (is (nil? (:error session)))
+        (is (= "at-1" (get-in session [:tokens :access_token])))
+        (is (empty? @requests))))))
+
+(deftest restore-refresh-true-forces-refresh-test
+  (let [client (test-client)
+        _ (seed-session! client)
+        {:keys [handler requests]} (fake-http/routed
+                                    (conj resolution-routes
+                                          ["/token" token-success-response]))]
+    (with-redefs [http/handle-request handler]
+      (let [session (deref (oauth/restore client did :refresh true) 5000 ::timeout)]
+        (is (= "at-2" (get-in session [:tokens :access_token])))
+        (is (= 1 (count (requests-to requests "/token"))))))))
 
 (deftest restore-unknown-did-never-hangs-test
   (let [client (test-client)

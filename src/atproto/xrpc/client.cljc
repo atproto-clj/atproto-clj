@@ -50,8 +50,11 @@
 
      MUST eventually call cb exactly once with either a NEW session value
      (satisfying Session, with refreshed tokens) or an {:error ...} map.
-     Implementations must never throw out of the calling thread without
-     invoking cb."))
+     Error maps may carry ::session-expired? true to signal that the session
+     is definitively dead (e.g. the server rejected the refresh token); the
+     client then drops its session and subsequent requests are sent
+     unauthenticated. Implementations must never throw out of the calling
+     thread without invoking cb."))
 
 (defn invalid-token-response?
   "True if this HTTP response indicates the access token was rejected and a
@@ -87,7 +90,8 @@
   an {:error ...} map. The first caller triggers the session's refresh-token;
   callers that arrive while a refresh is in flight queue on its result. On
   success the client's session atom is reset to the new session before any
-  waiter is invoked."
+  waiter is invoked; on an error carrying ::session-expired? the session atom
+  is reset to nil (the session is dropped)."
   [{:keys [session ::refresh-state]} cb]
   (let [[prev _] (swap-vals! refresh-state
                              (fn [state]
@@ -100,7 +104,9 @@
                        (when (compare-and-set! delivered? false true)
                          (let [[{:keys [waiters]} _] (swap-vals! refresh-state
                                                                 (constantly nil))]
-                           (when-not (:error result)
+                           (if (:error result)
+                             (when (::session-expired? result)
+                               (reset! session nil))
                              (reset! session result))
                            (run! #(% result) waiters))))]
         (try
@@ -124,7 +130,11 @@
   new session, or continues with the full {:error ...} map from the refresh
   callback as the response. A retried request that fails again with an
   invalid-token response is returned to the caller as-is (no second refresh).
-  The leave fn returns nil after handing off to i/continue."
+  The leave fn returns nil after handing off to i/continue.
+
+  A session dropped after a definitive refresh failure (see ::session-expired?
+  on `refresh-token`) leaves nil in the session atom: subsequent requests are
+  sent unauthenticated and no further refresh is attempted."
   [{:keys [session] :as client}]
   (let [wrap-auth (fn [ctx]
                     (-> ctx
@@ -132,11 +142,12 @@
                         (update ::i/queue #(cons (auth-interceptor @session) %))))]
     {::i/name ::delegate-auth-interceptor
      ::i/enter (fn [ctx]
-                 (if session
+                 (if (and session @session)
                    (wrap-auth ctx)
                    ctx))
      ::i/leave (fn [{:keys [::i/response ::original-ctx] :as ctx}]
                  (if (and session
+                          @session
                           (invalid-token-response? response)
                           (not (:refresh? @session))
                           (not (::auth-retried? ctx)))

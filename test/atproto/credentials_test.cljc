@@ -107,7 +107,49 @@
                resp (deref (xrpc-client/procedure xrpc {:nsid "com.example.ping"
                                                         :body {:n 1}})
                            2000 ::timeout)]
-           (is (= "InvalidDID" (:error resp))))))))
+           (is (= "InvalidDID" (:error resp)))
+           ;; a DID change is definitive: the session is dropped
+           (is (nil? @(:session xrpc))))))))
+
+#?(:clj
+   (deftest refresh-definitive-failure-drops-session-test
+     ;; a refreshSession rejected with ExpiredToken means the session is dead:
+     ;; the error is delivered and the client drops its session
+     (let [{:keys [handler]}
+           (fake-http/routed
+            [["plc.directory" (fake-http/json-response did-doc)]
+             ["createSession" create-session-response]
+             ["refreshSession" (fake-http/json-response 400 {:error "ExpiredToken"})]
+             ["" (fake-http/json-response 400 {:error "ExpiredToken"})]])]
+       (with-redefs [http/handle-request handler]
+         (let [session (deref (credentials/create {:identifier did :password "pw"})
+                              1000 ::timeout)
+               xrpc (xrpc-client/init {:session session})
+               resp (deref (xrpc-client/procedure xrpc {:nsid "com.example.ping"
+                                                        :body {:n 1}})
+                           2000 ::timeout)]
+           (is (= "ExpiredToken" (:error resp)))
+           (is (nil? @(:session xrpc))))))))
+
+#?(:clj
+   (deftest refresh-network-failure-keeps-session-test
+     ;; a transient refresh failure leaves the session in place
+     (let [{:keys [handler]}
+           (fake-http/routed
+            [["plc.directory" (fake-http/json-response did-doc)]
+             ["createSession" create-session-response]
+             ["refreshSession" {:error "HTTPClientError"
+                                :message "connection refused"}]
+             ["" (fake-http/json-response 400 {:error "ExpiredToken"})]])]
+       (with-redefs [http/handle-request handler]
+         (let [session (deref (credentials/create {:identifier did :password "pw"})
+                              1000 ::timeout)
+               xrpc (xrpc-client/init {:session session})
+               resp (deref (xrpc-client/procedure xrpc {:nsid "com.example.ping"
+                                                        :body {:n 1}})
+                           2000 ::timeout)]
+           (is (= "HTTPClientError" (:error resp)))
+           (is (= "access-1" (:accessJwt @(:session xrpc)))))))))
 
 #?(:clj
    (deftest logout-test

@@ -95,7 +95,30 @@
        (with-redefs [http/handle-request handler]
          (let [resp (deref (client/procedure xrpc {:nsid "com.example.proc" :body {:a 1}})
                            1000 ::timeout)]
-           (is (= {:error "TokenRefreshError" :message "x"} resp)))))))
+           (is (= {:error "TokenRefreshError" :message "x"} resp))
+           ;; a transient refresh failure keeps the session in place
+           (is (= "old" (:token @(:session xrpc)))))))))
+
+#?(:clj
+   (deftest definitive-refresh-failure-drops-session-test
+     ;; an error tagged ::client/session-expired? drops the session: the
+     ;; error is delivered and subsequent requests go out unauthenticated
+     (let [session (stub-session "old"
+                                 (fn [_ cb] (cb {:error "TokenRefreshError"
+                                                 ::client/session-expired? true})))
+           {:keys [handler requests]} (fake-http/scripted
+                                       [expired-response
+                                        (fake-http/json-response {:anon true})])
+           xrpc (client/init {:session session})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/procedure xrpc {:nsid "com.example.proc" :body {:a 1}})
+                           1000 ::timeout)]
+           (is (= "TokenRefreshError" (:error resp)))
+           (is (nil? @(:session xrpc)))
+           (let [resp2 (deref (client/procedure xrpc {:nsid "com.example.proc" :body {:a 1}})
+                              1000 ::timeout)]
+             (is (= {:anon true} resp2))
+             (is (nil? (bearer (second @requests))))))))))
 
 #?(:clj
    (deftest refresh-token-throwing-delivers-error-test
