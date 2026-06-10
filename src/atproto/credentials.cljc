@@ -7,16 +7,33 @@
 
 (declare auth-interceptor xrpc-refresh-session)
 
+(s/def ::accessJwt string?)
+(s/def ::refreshJwt string?)
+(s/def ::session
+  (s/keys :req-un [::accessJwt ::refreshJwt]))
+
 (defn- session
-  [{:keys [did didDoc handle accessJwt refreshJwt]}]
-  (with-meta
-    (cond-> {:accessJwt accessJwt
-             :refreshJwt refreshJwt}
-      did (assoc :did did)
-      didDoc (assoc :pds (identity/did-doc-pds didDoc))
-      handle (assoc :handle handle))
-    {`xrpc-client/auth-interceptor auth-interceptor
-     `xrpc-client/refresh-token xrpc-refresh-session}))
+  "Build a session map (with Session protocol metadata) from a
+  createSession/refreshSession response, falling back to `prev` for
+  :did/:pds/:handle when the response omits did/didDoc/handle."
+  ([resp] (session nil resp))
+  ([prev {:keys [did didDoc handle accessJwt refreshJwt]}]
+   (let [did (or did (:did prev))
+         pds (if didDoc (identity/did-doc-pds didDoc) (:pds prev))
+         handle (or handle (:handle prev))]
+     (with-meta
+       (cond-> {:accessJwt accessJwt
+                :refreshJwt refreshJwt}
+         did (assoc :did did)
+         pds (assoc :pds pds)
+         handle (assoc :handle handle))
+       {`xrpc-client/auth-interceptor auth-interceptor
+        `xrpc-client/refresh-token xrpc-refresh-session}))))
+
+(defn- refresh-client
+  "An XRPC client that authenticates with the session's refresh JWT."
+  [sess]
+  (xrpc-client/init {:session (assoc sess :refresh? true)}))
 
 (defn- xrpc-create-session
   "Call `createSession` on the PDS to authenticate those credentials."
@@ -46,16 +63,43 @@
                                    (xrpc-create-session identity credentials cb))))
     val))
 
-(defn xrpc-refresh-session
-  [session cb]
-  (xrpc-client/procedure (xrpc-client/init (assoc session :refresh? true))
+(defn- xrpc-refresh-session
+  "Session protocol impl. POSTs com.atproto.server.refreshSession through a
+  refresh-mode XRPC client. cb receives the rebuilt session (new
+  accessJwt/refreshJwt, metadata reattached) or {:error ...}. Delivers
+  {:error \"InvalidDID\" ...} if the response :did differs from the current
+  session's."
+  [sess cb]
+  (xrpc-client/procedure (refresh-client sess)
                          {:nsid "com.atproto.server.refreshSession"}
                          :callback
                          (fn [{:keys [error] :as resp}]
-                           (if error
+                           (cond
+                             error
                              (cb resp)
-                             (cb (merge session
-                                        (session resp)))))))
+
+                             (and (:did sess) (not= (:did sess) (:did resp)))
+                             (cb {:error "InvalidDID"
+                                  :message "The DID changed across the session refresh."
+                                  :did (:did resp)})
+
+                             :else
+                             (cb (session sess resp))))))
+
+(defn logout
+  "Invalidate the session server-side (com.atproto.server.deleteSession,
+  authenticated with the refreshJwt). Server errors are reported in the
+  result but the session should be considered dead regardless.
+
+  Async via :callback/:promise/:channel opts; resolves to {} or {:error ...}."
+  [session & {:as opts}]
+  (let [[cb val] (i/platform-async opts)]
+    (xrpc-client/procedure (refresh-client session)
+                           {:nsid "com.atproto.server.deleteSession"}
+                           :callback
+                           (fn [{:keys [error] :as resp}]
+                             (cb (if error resp {}))))
+    val))
 
 (defn auth-interceptor
   [{:keys [accessJwt refreshJwt refresh?] :as session}]
