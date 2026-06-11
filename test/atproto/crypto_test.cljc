@@ -3,6 +3,9 @@
                :cljs [cljs.test :refer :all])
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
             [multiformats.base :as mb]
             [atproto.runtime.bytes :as bytes]
             [atproto.runtime.json :as json]
@@ -89,18 +92,7 @@
 
 #?(:clj
    (deftest key-compression-test
-     (doseq [alg algs]
-       (testing (str alg " compressed <-> uncompressed round-trips")
-         (dotimes [_ 100]
-           (let [kp (result-of (crypto/generate alg))
-                 ^bytes compressed (crypto/public-key kp)
-                 ^bytes uncompressed (crypto/decompress-pubkey alg compressed)]
-             (is (= 33 (alength compressed)))
-             (is (= 65 (alength uncompressed)))
-             (is (= 0x04 (aget uncompressed 0)))
-             (is (bytes/eq? compressed (crypto/compress-pubkey alg uncompressed)))
-             ;; compress-pubkey accepts either form
-             (is (bytes/eq? compressed (crypto/compress-pubkey alg compressed)))))))
+     ;; the round-trip itself is covered generatively below
      (testing "error cases"
        (is (= "InvalidPublicKey" (:error (crypto/decompress-pubkey "ES256" (byte-array 65)))))
        ;; x = 2^256 - 1 is not a valid field element on either curve
@@ -108,6 +100,61 @@
          (is (= "InvalidPublicKey" (:error (crypto/decompress-pubkey "ES256" bad))))
          (is (= "InvalidPublicKey" (:error (crypto/compress-pubkey "ES256K" bad)))))
        (is (= "UnsupportedAlgorithm" (:error (crypto/compress-pubkey "EdDSA" (byte-array 33))))))))
+
+;; -----------------------------------------------------------------------------
+;; Generative properties (test.check)
+;; -----------------------------------------------------------------------------
+
+#?(:clj
+   (def gen-keypair
+     "[alg Keypair] from a random 32-byte private scalar (discarding the
+     astronomically rare out-of-range scalars instead of shrinking on them)."
+     (gen/such-that
+      (fn [[_ kp]] (not (map? kp)))
+      (gen/fmap (fn [[alg bs]]
+                  [alg (result-of (crypto/import-private-key alg (byte-array bs)))])
+                (gen/tuple (gen/elements algs)
+                           (gen/vector (gen/choose 0 255) 32))))))
+
+#?(:clj
+   (defspec key-compression-round-trip-spec 100
+     (prop/for-all [[alg kp] gen-keypair]
+       (let [^bytes compressed (crypto/public-key kp)
+             ^bytes uncompressed (crypto/decompress-pubkey alg compressed)]
+         (and (= 33 (alength compressed))
+              (= 65 (alength uncompressed))
+              (= 0x04 (aget uncompressed 0))
+              (bytes/eq? compressed (crypto/compress-pubkey alg uncompressed))
+              ;; compress-pubkey accepts either form
+              (bytes/eq? compressed (crypto/compress-pubkey alg compressed)))))))
+
+#?(:clj
+   (defspec sign-verify-low-s-deterministic-spec 30
+     (prop/for-all [[alg kp] gen-keypair
+                    msg gen/bytes]
+       (let [^bytes sig (result-of (crypto/sign kp msg))
+             s (BigInteger. 1 (Arrays/copyOfRange sig 32 64))
+             ^BigInteger n (curve-order alg)]
+         (and (= 64 (alength sig))
+              ;; low-S: s <= n/2
+              (<= (.compareTo s (.shiftRight n 1)) 0)
+              ;; own sigs verify strictly
+              (true? (result-of (crypto/verify (crypto/public-key kp) sig msg :alg alg)))
+              ;; RFC 6979: deterministic
+              (bytes/eq? sig (result-of (crypto/sign kp msg))))))))
+
+#?(:clj
+   (defspec did-key-round-trip-spec 100
+     (prop/for-all [[alg kp] gen-keypair]
+       (let [did (crypto/did kp)
+             {parsed-alg :alg ^bytes parsed-bytes :bytes} (crypto/did-key->pubkey did)]
+         (and (str/starts-with? did "did:key:z")
+              (= alg parsed-alg)
+              (= 65 (alength parsed-bytes))
+              (bytes/eq? (crypto/public-key kp)
+                         (crypto/compress-pubkey alg parsed-bytes))
+              ;; formatting the parsed (uncompressed) key yields the same did
+              (= did (crypto/pubkey->did-key alg parsed-bytes)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; did:key W3C test vectors
@@ -222,23 +269,6 @@
                 (:error (result-of (crypto/verify (crypto/public-key kp) sig msg)))))
          (is (= "InvalidPublicKey"
                 (:error (result-of (crypto/verify (byte-array 33) sig msg :alg "ES256")))))))))
-
-#?(:clj
-   (deftest low-s-and-determinism-test
-     (doseq [alg algs]
-       (testing (str alg " signatures are low-S and deterministic")
-         (let [kp (result-of (crypto/generate alg))
-               ^BigInteger n (curve-order alg)
-               half (.shiftRight n 1)]
-           (dotimes [i 25]
-             (let [msg (.getBytes (str "message " i) "UTF-8")
-                   ^bytes sig (result-of (crypto/sign kp msg))
-                   s (BigInteger. 1 (Arrays/copyOfRange sig 32 64))]
-               (is (= 64 (alength sig)))
-               (is (<= (.compareTo s half) 0))
-               (is (true? (result-of (crypto/verify (crypto/public-key kp) sig msg :alg alg))))
-               (testing "RFC 6979: signing twice yields identical bytes"
-                 (is (bytes/eq? sig (result-of (crypto/sign kp msg))))))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Multibase wrappers
