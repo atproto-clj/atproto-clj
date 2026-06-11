@@ -24,6 +24,23 @@
                        (str/starts-with? % "#")))
           (into []))))
 
+(deftest parse-nsid-test
+  (testing "authority is returned in domain order"
+    (is (= {:authority "feed.bsky.app" :name "post"}
+           (lexicon/parse-nsid "app.bsky.feed.post")))
+    (is (= {:authority "example.com" :name "fooBar"}
+           (lexicon/parse-nsid "com.example.fooBar"))))
+  (testing "valid NSIDs parse"
+    (doseq [nsid (interop-test-cases "syntax/nsid_syntax_valid.txt")]
+      (let [{:keys [authority name]} (lexicon/parse-nsid nsid)]
+        (is (string? authority) (str nsid " has an authority"))
+        (is (string? name) (str nsid " has a name")))))
+  (testing "invalid NSIDs return nil"
+    (doseq [nsid (interop-test-cases "syntax/nsid_syntax_invalid.txt")]
+      (is (nil? (lexicon/parse-nsid nsid)) (str nsid " does not parse")))
+    (is (nil? (lexicon/parse-nsid nil)))
+    (is (nil? (lexicon/parse-nsid 42)))))
+
 (defn- blob-ref
   "Helper to create test blob refs."
   [mime-type size]
@@ -369,19 +386,163 @@
 
     }})
 
-(defn translate-and-register-specs!
+(defn register-test-specs!
   [schema]
   (let [schema-valid? (s/valid? :atproto.lexicon.schema/file schema)]
     (when (is schema-valid? "The test schema is valid.")
-      (eval `(do ~@(lexicon/translate schema))))))
+      (lexicon/register-specs! {(:id schema) schema})
+      true)))
 
-(deftest test-translator
-  (when (translate-and-register-specs! schema)
+(defn spec-for
+  "The registered validator for this spec key, or the key itself."
+  [spec-key]
+  (or (lexicon/registered-validator spec-key) spec-key))
+
+(defn- record-schema
+  [id key]
+  {:lexicon 1
+   :id id
+   :defs {:main {:type "record"
+                 :key key
+                 :record {:type "object"
+                          :properties {:text {:type "string"}}}}}})
+
+(deftest test-record-key-validation
+  (lexicon/register-specs!
+   (lexicon/lexicon [(record-schema "com.example.tidKeyed" "tid")
+                     (record-schema "com.example.nsidKeyed" "nsid")
+                     (record-schema "com.example.selfKeyed" "literal:self")
+                     (record-schema "com.example.anyKeyed" "any")
+                     {:lexicon 1
+                      :id "com.example.notARecord"
+                      :defs {:main {:type "query"}}}]))
+  (testing "tid keys"
+    (doseq [rkey (interop-test-cases "syntax/tid_syntax_valid.txt")]
+      (is (true? (lexicon/valid-record-key? "com.example.tidKeyed" rkey))
+          (str rkey " is a valid tid record key")))
+    (doseq [rkey (interop-test-cases "syntax/tid_syntax_invalid.txt")]
+      (is (false? (lexicon/valid-record-key? "com.example.tidKeyed" rkey))
+          (str rkey " is not a valid tid record key"))))
+  (testing "nsid keys"
+    (doseq [rkey (interop-test-cases "syntax/nsid_syntax_valid.txt")]
+      (is (true? (lexicon/valid-record-key? "com.example.nsidKeyed" rkey))
+          (str rkey " is a valid nsid record key")))
+    (doseq [rkey (interop-test-cases "syntax/nsid_syntax_invalid.txt")]
+      (is (false? (lexicon/valid-record-key? "com.example.nsidKeyed" rkey))
+          (str rkey " is not a valid nsid record key"))))
+  (testing "literal keys"
+    (is (true? (lexicon/valid-record-key? "com.example.selfKeyed" "self")))
+    (is (false? (lexicon/valid-record-key? "com.example.selfKeyed" "other")))
+    (is (false? (lexicon/valid-record-key? "com.example.selfKeyed" "literal:self"))))
+  (testing "any keys"
+    (doseq [rkey (interop-test-cases "syntax/recordkey_syntax_valid.txt")]
+      (is (true? (lexicon/valid-record-key? "com.example.anyKeyed" rkey))
+          (str rkey " is a valid record key")))
+    (doseq [rkey (interop-test-cases "syntax/recordkey_syntax_invalid.txt")]
+      (is (false? (lexicon/valid-record-key? "com.example.anyKeyed" rkey))
+          (str rkey " is not a valid record key"))))
+  (testing "unknown or non-record collections"
+    (is (= "UnknownCollection"
+           (:error (lexicon/valid-record-key? "com.example.unregistered" "abc"))))
+    (is (= "UnknownCollection"
+           (:error (lexicon/valid-record-key? "com.example.notARecord" "abc"))))
+    (is (nil? (lexicon/record-key-spec "com.example.unregistered")))
+    (is (nil? (lexicon/record-key-spec "com.example.notARecord")))))
+
+(deftest test-union-ref-check
+  (testing "a union ref targeting a non-object def in the set throws"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo)
+                 (lexicon/lexicon
+                  [{:lexicon 1
+                    :id "com.example.unionBad"
+                    :defs {:name {:type "string"}
+                           :main {:type "object"
+                                  :properties {:value {:type "union"
+                                                       :refs ["#name"]}}}}}]))))
+  (testing "a union ref targeting a non-object def in another schema of the set throws"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo)
+                 (lexicon/lexicon
+                  [{:lexicon 1
+                    :id "com.example.unionBad"
+                    :defs {:main {:type "object"
+                                  :properties {:value {:type "union"
+                                                       :refs ["com.example.other#name"]}}}}}
+                   {:lexicon 1
+                    :id "com.example.other"
+                    :defs {:name {:type "string"}}}]))))
+  (testing "union refs to object defs and to absent schemas are fine"
+    (is (map? (lexicon/lexicon
+               [{:lexicon 1
+                 :id "com.example.unionGood"
+                 :defs {:thing {:type "object" :properties {}}
+                        :main {:type "object"
+                               :properties {:value {:type "union"
+                                                    :refs ["#thing"
+                                                           "com.example.absent#thing"]}}}}}])))))
+
+(def modes-schema
+  {:lexicon 1
+   :id "com.example.modes"
+   :defs {:datetime {:type "string" :format "datetime"}
+          :atUri    {:type "string" :format "at-uri"}
+          :blob     {:type "blob" :accept ["image/*"] :maxSize 1000}}})
+
+(deftest test-strict-lenient-modes
+  (when (register-test-specs! modes-schema)
+    (let [datetime (spec-for :com.example.modes/datetime)
+          at-uri (spec-for :com.example.modes/atUri)
+          blob (spec-for :com.example.modes/blob)
+          lenient-valid? (fn [spec x]
+                           (binding [lexicon/*strict* false]
+                             (s/valid? spec x)))]
+      (testing "datetime: strict-valid inputs behave identically in both modes"
+        (doseq [s (interop-test-cases "syntax/datetime_syntax_valid.txt")]
+          (is (s/valid? datetime s) (str s " is valid in strict mode"))
+          (is (lenient-valid? datetime s) (str s " is valid in lenient mode"))))
+      (testing "datetime: offset-less ISO datetimes pass only in lenient mode"
+        (doseq [s ["1985-04-12T23:20:50"
+                   "1985-04-12T23:20:50.123"]]
+          (is (not (s/valid? datetime s)) (str s " is invalid in strict mode"))
+          (is (lenient-valid? datetime s) (str s " is valid in lenient mode"))))
+      (testing "datetime: junk fails in both modes"
+        (doseq [s ["" "foo" "1985-04-12" nil 42]]
+          (is (not (s/valid? datetime s)))
+          (is (not (lenient-valid? datetime s)))))
+      (testing "at-uri: rkey record-key validity only enforced in strict mode"
+        (let [valid "at://user.bsky.social/app.bsky.feed.post/3jzfcijpj2z2a"
+              bad-rkey "at://user.bsky.social/app.bsky.feed.post/key!"]
+          (is (s/valid? at-uri valid))
+          (is (lenient-valid? at-uri valid))
+          (is (not (s/valid? at-uri bad-rkey)))
+          (is (lenient-valid? at-uri bad-rkey))
+          (is (not (s/valid? at-uri "at://")))
+          (is (not (lenient-valid? at-uri "at://")))))
+      (testing "blob: legacy untyped refs pass only in lenient mode"
+        (let [cid-str (data/format-cid (data/blob-ref (byte-array [1])))
+              legacy {:cid cid-str :mimeType "image/png"}]
+          (is (not (s/valid? blob legacy)))
+          (is (lenient-valid? blob legacy))
+          ;; junk that is not a legacy ref fails in both modes
+          (is (not (lenient-valid? blob {:cid "not-a-cid" :mimeType "image/png"})))
+          (is (not (lenient-valid? blob {:cid cid-str})))))
+      (testing "blob: accept/maxSize checks are skipped in lenient mode"
+        (let [good (blob-ref "image/png" 5)
+              oversized (blob-ref "image/png" 2000)
+              wrong-mime (blob-ref "text/plain" 5)]
+          (is (s/valid? blob good))
+          (is (lenient-valid? blob good))
+          (is (not (s/valid? blob oversized)))
+          (is (lenient-valid? blob oversized))
+          (is (not (s/valid? blob wrong-mime)))
+          (is (lenient-valid? blob wrong-mime)))))))
+
+(deftest test-validator-compiler
+  (when (register-test-specs! schema)
     (doseq [[k def] (:defs schema)]
       (let [spec-key (keyword (:id schema) (name k))]
         (doseq [valid (::valid def)]
-          (is (s/valid? spec-key valid)
+          (is (s/valid? (spec-for spec-key) valid)
               (str "\"" valid "\" is a valid " spec-key)))
         (doseq [invalid (::invalid def)]
-          (is (not (s/valid? spec-key invalid))
+          (is (not (s/valid? (spec-for spec-key) invalid))
               (str "[" invalid "] is not a valid " spec-key)))))))

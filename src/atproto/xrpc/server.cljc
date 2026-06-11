@@ -413,9 +413,11 @@
   [{:keys [validate-response?]} nsid xrpc-response]
   (let [spec-key (binding [lexicon/*schema-validate* (boolean validate-response?)]
                    (lexicon/response-spec-key nsid))]
-    (if (s/valid? spec-key xrpc-response)
-      xrpc-response
-      (invalid-response (s/explain-str spec-key xrpc-response)))))
+    ;; responses are validated leniently; request validation stays strict
+    (binding [lexicon/*strict* false]
+      (if (s/valid? spec-key xrpc-response)
+        xrpc-response
+        (invalid-response (s/explain-str spec-key xrpc-response))))))
 
 (defn- process-request
   "Run the pipeline for a parsed xrpc-request; respond receives the

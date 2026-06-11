@@ -26,22 +26,25 @@
   "Initialize a new XRPC client and return it.
 
   config keys:
-  :service            Base URL of the XRPC service.
-  :session            Session to authenticate requests with.
-  :validate-requests? Validate requests against their lexicon before sending.
-  :headers            Map of default headers for every request (lowercase
-                      keyword keys).
-  :service-proxy      \"<did>#<service-id>\" emitted as the atproto-proxy
-                      header (a per-request atproto-proxy header wins).
-  :labelers           Coll of labeler DIDs, or {:did ... :redact? true} maps,
-                      emitted as the atproto-accept-labelers header.
-  :timeout            Default per-request timeout in ms.
-  :max-retries        Default retry count for retryable errors (default 0 = off).
+  :service             Base URL of the XRPC service.
+  :session             Session to authenticate requests with.
+  :validate-requests?  Validate requests against their lexicon before sending.
+  :validate-responses? Validate successful response bodies against their
+                       lexicon (schema-invalid responses yield
+                       {:error \"InvalidResponse\" ...}).
+  :headers             Map of default headers for every request (lowercase
+                       keyword keys).
+  :service-proxy       \"<did>#<service-id>\" emitted as the atproto-proxy
+                       header (a per-request atproto-proxy header wins).
+  :labelers            Coll of labeler DIDs, or {:did ... :redact? true} maps,
+                       emitted as the atproto-accept-labelers header.
+  :timeout             Default per-request timeout in ms.
+  :max-retries         Default retry count for retryable errors (default 0 = off).
 
   The returned client also carries ::refresh-state (atom) used to
   single-flight token refreshes. Throws if neither :service nor :session is
   provided, or if :service-proxy is malformed."
-  [{:keys [service session validate-requests?
+  [{:keys [service session validate-requests? validate-responses?
            headers service-proxy labelers timeout max-retries] :as config}]
   (cond
     (and (not service) (not session))
@@ -55,6 +58,7 @@
     (cond-> {:service (or service (:pds session))
              :session (when session (atom session))
              :validate-requests? (boolean validate-requests?)
+             :validate-responses? (boolean validate-responses?)
              ::refresh-state (atom nil)}
       headers       (assoc :headers headers)
       service-proxy (assoc :service-proxy service-proxy)
@@ -117,6 +121,50 @@
                    (assoc ctx ::i/response (xrpc-error/invalid-request
                                             (s/explain-data spec request)))
                    ctx)))})
+
+(defn- response-validator
+  "Validate successful XRPC response bodies against the method's output schema.
+
+  Leave-stage only; sits between the query/procedure interceptor and the
+  transport interceptors so it sees the decoded HTTP response. A
+  schema-invalid successful response is replaced with
+  {:error \"InvalidResponse\" :message ... :explain-data ...}. Skipped when
+  :validate-responses? is false, for error-bodied or failed responses, and
+  for NSIDs whose schema is not registered. Validation is lenient
+  (lexicon/*strict* bound to false): server responses are parsed laxly while
+  requests stay strict, per the reference implementation's guidance
+  (lex-schema validator.ts)."
+  [{:keys [validate-responses?]} nsid]
+  {::i/name ::response-validator
+   ::i/leave
+   (fn [ctx]
+     (update ctx
+             ::i/response
+             (fn [{:keys [error status headers body] :as http-response}]
+               (if-not (and validate-responses?
+                            (not error)
+                            (http/success? status)
+                            (not (and (map? body) (:error body))))
+                 http-response
+                 (let [spec (binding [lexicon/*schema-validate* true]
+                              (lexicon/response-spec-key nsid))]
+                   (if-not (or (fn? spec) (s/get-spec spec))
+                     http-response
+                     (let [xrpc-response (cond-> {:body body}
+                                           (:content-type headers)
+                                           (assoc :encoding
+                                                  (-> (:content-type headers)
+                                                      (str/split #";")
+                                                      first
+                                                      str/trim)))]
+                       (binding [lexicon/*strict* false]
+                         (if (s/valid? spec xrpc-response)
+                           http-response
+                           {:error "InvalidResponse"
+                            :message (str "The response body does not match the "
+                                          "output schema for " nsid ".")
+                            :retryable? false
+                            :explain-data (s/explain-data spec xrpc-response)})))))))))})
 
 (defprotocol Session
   :extend-via-metadata true
@@ -380,6 +428,7 @@
         ctx {::i/request request
              ::i/queue (cond->> [(request-validator client)
                                  xrpc-interceptor
+                                 (response-validator client (:nsid request))
                                  (delegate-auth-interceptor client)
                                  atproto-json/client-interceptor
                                  json/client-interceptor
