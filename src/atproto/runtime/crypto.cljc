@@ -1,7 +1,7 @@
 (ns atproto.runtime.crypto
   "Cross-platform cryptographic functions for atproto."
   (:require [clojure.string :as str])
-  #?(:clj (:import [java.util Base64]
+  #?(:clj (:import [java.util Base64 HexFormat]
                    [com.nimbusds.jose.util Base64URL]
                    [java.security SecureRandom MessageDigest]
                    [java.nio.charset StandardCharsets])))
@@ -21,14 +21,36 @@
             seed)))
 
 (defn sha256
-  "sha256 of the bytes"
-  [s]
+  "SHA-256 digest of the input as a byte array.
+
+  Accepts a byte array, or a string which is UTF-8 encoded first."
+  [bytes-or-str]
   #?(:clj (.digest (MessageDigest/getInstance "SHA-256")
-                   (.getBytes ^String s StandardCharsets/UTF_8))))
+                   (if (string? bytes-or-str)
+                     (.getBytes ^String bytes-or-str StandardCharsets/UTF_8)
+                     ^bytes bytes-or-str))))
+
+(defn hex-encode
+  "Lowercase hex string of the byte array."
+  [^bytes b]
+  #?(:clj (.formatHex (HexFormat/of) b)))
+
+(defn hex-decode
+  "Bytes from a hex string, or nil if invalid."
+  [s]
+  #?(:clj (try (.parseHex (HexFormat/of) ^String s) (catch Exception _))))
+
+(defn sha256-hex
+  "Lowercase hex string of (sha256 bytes-or-str)."
+  [bytes-or-str]
+  (hex-encode (sha256 bytes-or-str)))
 
 (defn base64-encode
-  [s]
-  #?(:clj (try (.encodeToString (Base64/getEncoder) ^String s) (catch Exception _))))
+  "Standard base64 (RFC 4648 §4) string of the byte array, without padding
+  (required by the atproto $bytes form). base64-decode accepts both padded
+  and unpadded input."
+  [^bytes b]
+  #?(:clj (.encodeToString (.withoutPadding (Base64/getEncoder)) b)))
 
 (defn base64-decode
   [s]
@@ -38,6 +60,11 @@
   "bytes -> url-safe base64 string."
   [^bytes bytes]
   #?(:clj (str (Base64URL/encode bytes))))
+
+(defn base64url-decode
+  "Decode a base64url string (padding optional) to bytes, or nil if invalid."
+  [s]
+  #?(:clj (try (.decode (Base64/getUrlDecoder) ^String s) (catch Exception _))))
 
 (defn generate-pkce
   "Proof Key for Code Exchange (S256) with a verifier of the given size."
