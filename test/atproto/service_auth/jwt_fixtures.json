@@ -1,0 +1,89 @@
+{
+  "_meta": {
+    "description": "Service JWTs minted by the TypeScript reference implementation for cross-implementation verification.",
+    "repository": "https://github.com/bluesky-social/atproto",
+    "commit": "3e977fe0ab88145f4ff26b491f371d3bade22505",
+    "packages": {
+      "@atproto/xrpc-server": "0.11.1",
+      "@atproto/crypto": "0.5.0"
+    },
+    "script": "generate_fixtures.mjs (this directory)"
+  },
+  "iss": "did:example:alice",
+  "aud": "did:example:bob",
+  "lxm": "com.atproto.repo.createRecord",
+  "cases": [
+    {
+      "alg": "ES256K",
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "did_key": "did:key:zQ3shVc2UkAfJCdc1TR8E66J85h48P43r93q8jGPkPpjF9Ef9",
+      "tokens": {
+        "with_lxm": {
+          "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NksifQ.eyJpYXQiOjE3NTAwMDAwMDAsImlzcyI6ImRpZDpleGFtcGxlOmFsaWNlIiwiYXVkIjoiZGlkOmV4YW1wbGU6Ym9iIiwiZXhwIjozMjUwMzY4MDAwMCwibHhtIjoiY29tLmF0cHJvdG8ucmVwby5jcmVhdGVSZWNvcmQiLCJqdGkiOiI1ZmU5ZjUyNzc0YWQ3ZGFkMzQxOTFkZTJiNDM0NTc1ZCJ9.mfnJAiHsZhoGx00zrhnfWauPXPNTIt7xBqFQwFDY8nxwC--3Hon4TLFkvgdfafYSxRt1uREZhV9tjhymVG0ofA",
+          "claims": {
+            "iat": 1750000000,
+            "iss": "did:example:alice",
+            "aud": "did:example:bob",
+            "exp": 32503680000,
+            "lxm": "com.atproto.repo.createRecord"
+          }
+        },
+        "no_lxm": {
+          "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NksifQ.eyJpYXQiOjE3NTAwMDAwMDAsImlzcyI6ImRpZDpleGFtcGxlOmFsaWNlIiwiYXVkIjoiZGlkOmV4YW1wbGU6Ym9iIiwiZXhwIjozMjUwMzY4MDAwMCwianRpIjoiNGE5NDcwMjdjZDU4N2NhZWUxODM1MjU3Yjc5YjNjMjgifQ._kAEmtIZyB2qkxaNwEz3_fRlZZyHqKQTwFfwo8A42mlULkvzR7no7HtzD9j6WwrWOwU5-vrDAeteK8BnoOdDBg",
+          "claims": {
+            "iat": 1750000000,
+            "iss": "did:example:alice",
+            "aud": "did:example:bob",
+            "exp": 32503680000
+          }
+        },
+        "expired": {
+          "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NksifQ.eyJpYXQiOjE3NTAwMDAwMDAsImlzcyI6ImRpZDpleGFtcGxlOmFsaWNlIiwiYXVkIjoiZGlkOmV4YW1wbGU6Ym9iIiwiZXhwIjoxNzUwMDAwMDYwLCJseG0iOiJjb20uYXRwcm90by5yZXBvLmNyZWF0ZVJlY29yZCIsImp0aSI6IjkyMzc3YzM0MTEzN2YxN2NjYmNmNTA3Y2QyMDliMzU0In0.L1q4hoEgvNR6R65BN92cVcLbbE13tErZYlMSnU9p518oyBIYXbiIqAOxvws0yCm0mUwpqPQN3U5hfOB0LPhvDg",
+          "claims": {
+            "iat": 1750000000,
+            "iss": "did:example:alice",
+            "aud": "did:example:bob",
+            "exp": 1750000060,
+            "lxm": "com.atproto.repo.createRecord"
+          }
+        }
+      }
+    },
+    {
+      "alg": "ES256",
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "did_key": "did:key:zDnaer52RTwabaBeMkKYYwZmEFqPabLW78cRK62iovMUQhFif",
+      "tokens": {
+        "with_lxm": {
+          "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJpYXQiOjE3NTAwMDAwMDAsImlzcyI6ImRpZDpleGFtcGxlOmFsaWNlIiwiYXVkIjoiZGlkOmV4YW1wbGU6Ym9iIiwiZXhwIjozMjUwMzY4MDAwMCwibHhtIjoiY29tLmF0cHJvdG8ucmVwby5jcmVhdGVSZWNvcmQiLCJqdGkiOiJkNGE3NTViMjdiY2EzNjc5MDlkNzZlNzRhMzI4ODY1ZiJ9.aL5Xa2wI6hRjzuO18_N2wGNKLaVy0rDMVIclvAxiYrlcO52yXWdIVG-VxNo4cK3C0ngdSi5yxxCS532RD3CBrA",
+          "claims": {
+            "iat": 1750000000,
+            "iss": "did:example:alice",
+            "aud": "did:example:bob",
+            "exp": 32503680000,
+            "lxm": "com.atproto.repo.createRecord"
+          }
+        },
+        "no_lxm": {
+          "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJpYXQiOjE3NTAwMDAwMDAsImlzcyI6ImRpZDpleGFtcGxlOmFsaWNlIiwiYXVkIjoiZGlkOmV4YW1wbGU6Ym9iIiwiZXhwIjozMjUwMzY4MDAwMCwianRpIjoiODE1MjRkNjRmY2RlYzEwY2VhY2Q2MDk3MGZiYmFhZGQifQ.SGMFP63XTVEsouYkFyAQjatD9-7_iDE6hmZeMBliIsYCgA6VBR6Fyttg1MzIwInXWets8l-W0t1S4nY6yw37hg",
+          "claims": {
+            "iat": 1750000000,
+            "iss": "did:example:alice",
+            "aud": "did:example:bob",
+            "exp": 32503680000
+          }
+        },
+        "expired": {
+          "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJpYXQiOjE3NTAwMDAwMDAsImlzcyI6ImRpZDpleGFtcGxlOmFsaWNlIiwiYXVkIjoiZGlkOmV4YW1wbGU6Ym9iIiwiZXhwIjoxNzUwMDAwMDYwLCJseG0iOiJjb20uYXRwcm90by5yZXBvLmNyZWF0ZVJlY29yZCIsImp0aSI6IjUwMGM0OTAzYzM1ODE1YWU0NmNlZTMxNTIyNGY4YjAxIn0.YeEpncHkWBe2vLubgjsysMGuZ4rzmUbz1Wgy8lIqlC4uB2pJeAzwADhry7k2pdk8vq1vnOfP6fhhM7K9uty7VQ",
+          "claims": {
+            "iat": 1750000000,
+            "iss": "did:example:alice",
+            "aud": "did:example:bob",
+            "exp": 1750000060,
+            "lxm": "com.atproto.repo.createRecord"
+          }
+        }
+      }
+    }
+  ]
+}
