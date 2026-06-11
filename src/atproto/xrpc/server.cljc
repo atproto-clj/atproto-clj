@@ -137,9 +137,12 @@
                                   xrpc-response
                                   (let [spec-key (binding [lexicon/*schema-validate* validate-response?]
                                                    (lexicon/response-spec-key (:nsid xrpc-request)))]
-                                    (if (not (s/valid? spec-key xrpc-response))
-                                      (invalid-response (s/explain-str spec-key xrpc-response))
-                                      xrpc-response))))))))))
+                                    ;; responses are validated leniently;
+                                    ;; request validation stays strict
+                                    (binding [lexicon/*strict* false]
+                                      (if (not (s/valid? spec-key xrpc-response))
+                                        (invalid-response (s/explain-str spec-key xrpc-response))
+                                        xrpc-response)))))))))))
    ::i/leave (fn [ctx]
                (update ctx
                        ::i/response

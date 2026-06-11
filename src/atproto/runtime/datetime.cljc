@@ -1,5 +1,5 @@
 (ns atproto.runtime.datetime
-  #?(:clj (:import [java.time OffsetDateTime]
+  #?(:clj (:import [java.time LocalDateTime OffsetDateTime]
                    [java.time.temporal ChronoField]
                    [java.time.format DateTimeFormatter DateTimeFormatterBuilder DateTimeParseException SignStyle])))
 
@@ -24,6 +24,21 @@
   #?(:clj (try
             (OffsetDateTime/parse (trim-fraction s) datetime-formatter)
             (catch DateTimeParseException _))))
+
+(defn parse-lenient
+  "Lenient ISO-8601-ish datetime parse: the timezone offset is optional.
+
+  Tries the strict atproto datetime parse first, then falls back to a local
+  (offset-less) ISO date-time. Returns a platform datetime or nil. Mirrors
+  the reference implementation's isDatetimeStringLenient
+  (packages/syntax/src/datetime.ts)."
+  [s]
+  (when (string? s)
+    (or (parse s)
+        #?(:clj (try
+                  (LocalDateTime/parse (trim-fraction s)
+                                       DateTimeFormatter/ISO_LOCAL_DATE_TIME)
+                  (catch DateTimeParseException _))))))
 
 (defn current-time-millis
   []

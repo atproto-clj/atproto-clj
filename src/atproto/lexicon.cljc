@@ -742,6 +742,16 @@
 ;; global specs), preserving the lazy-ref semantics of the translator.
 ;; -----------------------------------------------------------------------------
 
+(def ^:dynamic *strict*
+  "When true (default), compiled validators enforce the full atproto spec.
+
+  When false: datetimes may be ISO-8601-ish (timezone offset optional),
+  legacy untyped blob refs {:cid <string> :mimeType <string>} are accepted
+  and blob accept/maxSize checks are skipped, and at-uri rkeys are not
+  validated against the record-key format. Binding this to false is the
+  only lenient-mode switch; it is consulted at validation time."
+  true)
+
 (defmulti ^:private compile-field-type
   "Compile the conformed field type definition into a predicate closure."
   (fn [ctx type-def] (:type type-def)))
@@ -768,11 +778,36 @@
            (or (nil? enum) (contains? enum x))
            (or (not has-const?) (= const x))))))
 
+(defn- lenient-at-uri?
+  "at-uri check that does not enforce the rkey record-key format
+  (TS isAtUriStringLenient)."
+  [s]
+  (boolean
+   (and (string? s)
+        (< (count s) (* 8 1024))
+        (when-let [[_ authority collection _ _] (re-matches regex/at-uri s)]
+          (and (s/valid? ::at-identifier authority)
+               (or (not collection) (s/valid? ::nsid collection)))))))
+
 (defn- compile-string-format
-  "The check predicate for the given string format name."
+  "The check predicate for the given string format name.
+
+  `datetime` and `at-uri` are the only formats with lenient variants
+  (consulted when *strict* is bound to false), mirroring the reference
+  implementation's stringFormatVerifiers (lex-schema string-format.ts)."
   [format]
-  (let [spec (keyword "atproto.lexicon" format)]
-    #(s/valid? spec %)))
+  (case format
+    "datetime" (fn [s]
+                 (if *strict*
+                   (s/valid? ::datetime s)
+                   (boolean (or (datetime/parse-lenient s)
+                                (s/valid? ::datetime s)))))
+    "at-uri" (fn [s]
+               (if *strict*
+                 (s/valid? ::at-uri s)
+                 (lenient-at-uri? s)))
+    (let [spec (keyword "atproto.lexicon" format)]
+      #(s/valid? spec %))))
 
 (defmethod compile-field-type "string"
   [_ {:keys [format maxLength minLength maxGraphemes minGraphemes enum const] :as def}]
@@ -803,9 +838,16 @@
 (defmethod compile-field-type "blob"
   [_ {:keys [accept maxSize]}]
   (fn [x]
-    (and (s/valid? ::data/blob x)
-         (or (nil? accept) (boolean (accept-mime-type? accept (:mimeType x))))
-         (or (nil? maxSize) (<= (:size x) maxSize)))))
+    (if *strict*
+      ;; A legacy (size-less) ref under a maxSize constraint fails in strict
+      ;; mode (TS parity, lex-schema blob.ts): it is not a valid typed blob.
+      (and (s/valid? ::data/blob x)
+           (or (nil? accept) (boolean (accept-mime-type? accept (:mimeType x))))
+           (or (nil? maxSize) (<= (:size x) maxSize)))
+      ;; Lenient: accept legacy untyped blob refs and skip the accept/maxSize
+      ;; checks.
+      (or (s/valid? ::data/blob x)
+          (s/valid? ::data/legacy-blob x)))))
 
 (defmethod compile-field-type "array"
   [ctx {:keys [items minLength maxLength]}]

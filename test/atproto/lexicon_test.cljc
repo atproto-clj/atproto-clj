@@ -398,6 +398,62 @@
   [spec-key]
   (or (lexicon/registered-validator spec-key) spec-key))
 
+(def modes-schema
+  {:lexicon 1
+   :id "com.example.modes"
+   :defs {:datetime {:type "string" :format "datetime"}
+          :atUri    {:type "string" :format "at-uri"}
+          :blob     {:type "blob" :accept ["image/*"] :maxSize 1000}}})
+
+(deftest test-strict-lenient-modes
+  (when (register-test-specs! modes-schema)
+    (let [datetime (spec-for :com.example.modes/datetime)
+          at-uri (spec-for :com.example.modes/atUri)
+          blob (spec-for :com.example.modes/blob)
+          lenient-valid? (fn [spec x]
+                           (binding [lexicon/*strict* false]
+                             (s/valid? spec x)))]
+      (testing "datetime: strict-valid inputs behave identically in both modes"
+        (doseq [s (interop-test-cases "syntax/datetime_syntax_valid.txt")]
+          (is (s/valid? datetime s) (str s " is valid in strict mode"))
+          (is (lenient-valid? datetime s) (str s " is valid in lenient mode"))))
+      (testing "datetime: offset-less ISO datetimes pass only in lenient mode"
+        (doseq [s ["1985-04-12T23:20:50"
+                   "1985-04-12T23:20:50.123"]]
+          (is (not (s/valid? datetime s)) (str s " is invalid in strict mode"))
+          (is (lenient-valid? datetime s) (str s " is valid in lenient mode"))))
+      (testing "datetime: junk fails in both modes"
+        (doseq [s ["" "foo" "1985-04-12" nil 42]]
+          (is (not (s/valid? datetime s)))
+          (is (not (lenient-valid? datetime s)))))
+      (testing "at-uri: rkey record-key validity only enforced in strict mode"
+        (let [valid "at://user.bsky.social/app.bsky.feed.post/3jzfcijpj2z2a"
+              bad-rkey "at://user.bsky.social/app.bsky.feed.post/key!"]
+          (is (s/valid? at-uri valid))
+          (is (lenient-valid? at-uri valid))
+          (is (not (s/valid? at-uri bad-rkey)))
+          (is (lenient-valid? at-uri bad-rkey))
+          (is (not (s/valid? at-uri "at://")))
+          (is (not (lenient-valid? at-uri "at://")))))
+      (testing "blob: legacy untyped refs pass only in lenient mode"
+        (let [cid-str (data/format-cid (data/blob-ref (byte-array [1])))
+              legacy {:cid cid-str :mimeType "image/png"}]
+          (is (not (s/valid? blob legacy)))
+          (is (lenient-valid? blob legacy))
+          ;; junk that is not a legacy ref fails in both modes
+          (is (not (lenient-valid? blob {:cid "not-a-cid" :mimeType "image/png"})))
+          (is (not (lenient-valid? blob {:cid cid-str})))))
+      (testing "blob: accept/maxSize checks are skipped in lenient mode"
+        (let [good (blob-ref "image/png" 5)
+              oversized (blob-ref "image/png" 2000)
+              wrong-mime (blob-ref "text/plain" 5)]
+          (is (s/valid? blob good))
+          (is (lenient-valid? blob good))
+          (is (not (s/valid? blob oversized)))
+          (is (lenient-valid? blob oversized))
+          (is (not (s/valid? blob wrong-mime)))
+          (is (lenient-valid? blob wrong-mime)))))))
+
 (deftest test-validator-compiler
   (when (register-test-specs! schema)
     (doseq [[k def] (:defs schema)]
