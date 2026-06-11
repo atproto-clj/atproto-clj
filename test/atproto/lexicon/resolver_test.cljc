@@ -8,13 +8,18 @@
   (:require #?(:clj [clojure.test :refer :all]
                :cljs [cljs.test :refer :all])
             #?@(:clj [[clojure.java.io :as io]
-                      [clojure.edn :as edn]])
+                      [clojure.edn :as edn]
+                      [atproto.crypto :as crypto]])
             [clojure.string :as str]
             [atproto.runtime.interceptor :as i]
             [atproto.runtime.http :as http]
             [atproto.runtime.dns :as dns]
             [atproto.runtime.json :as json]
             [atproto.test-support.http :as fake-http]
+            [atproto.repo :as repo]
+            [atproto.repo.blockstore :as blockstore]
+            [atproto.repo.sync :as repo-sync]
+            [atproto.repo.test-support.util :as repo-util]
             [atproto.lexicon.resolver :as resolver]))
 
 (def nsid "com.example.test.record")
@@ -213,6 +218,112 @@
       (is (nil? (:error (:result second-pass))))
       (is (= 2 (count (:requests second-pass)))))))
 
+;; -----------------------------------------------------------------------------
+;; Verified resolution (:verify? true): real signed commit proofs built with
+;; the repo provider (atproto.repo.sync/records->car) and an ES256K keypair.
+;; -----------------------------------------------------------------------------
+
+#?(:clj
+   (defn- proof-env
+     "A signed repo holding the lexicon record, its proof CAR, and a DID doc
+     advertising the signing key as a #atproto Multikey verification method.
+
+     Options:
+     :record       record value (default: lexicon-doc + \\$type)
+     :with-record? when false, the repo is empty and the proof CAR proves
+                   the record's absence (default true)
+     :doc-keypair  keypair advertised in the DID doc (defaults to the repo
+                   signing keypair; pass a different one to simulate a bad
+                   commit signature)"
+     [& {:keys [record with-record? doc-keypair]
+         :or {with-record? true}}]
+     (let [keypair (repo-util/ok! (repo-util/result-of (crypto/generate "ES256K")))
+           record (or record (assoc lexicon-doc :$type resolver/lexicon-record-collection))
+           storage (blockstore/memory-blockstore)
+           created (repo-util/ok!
+                    (repo-util/result-of
+                     (repo/create storage authority-did keypair
+                                  :initial-writes
+                                  (when with-record?
+                                    [{:collection resolver/lexicon-record-collection
+                                      :rkey nsid
+                                      :value record}]))))
+           car-bytes (repo-util/ok!
+                      (repo-sync/records->car storage (:cid created)
+                                              [{:collection resolver/lexicon-record-collection
+                                                :rkey nsid}]))
+           multikey (subs (crypto/did (or doc-keypair keypair)) (count "did:key:"))]
+       {:car-bytes car-bytes
+        :did-doc (assoc did-doc
+                        :verificationMethod
+                        [{:id (str authority-did "#atproto")
+                          :type "Multikey"
+                          :controller authority-did
+                          :publicKeyMultibase multikey}])})))
+
+#?(:clj
+   (defn- verified-routes
+     [{:keys [car-bytes did-doc]}]
+     [["plc.directory" (fake-http/json-response did-doc)]
+      ["/xrpc/com.atproto.sync.getRecord"
+       {:status 200
+        :headers {:content-type "application/vnd.ipld.car"}
+        :body car-bytes}]]))
+
+#?(:clj
+   (deftest verified-resolution-test
+     (let [env (proof-env)
+           {:keys [result requests]} (resolve-with-stubs
+                                      {:http-routes (verified-routes env)
+                                       :opts {:verify? true}})]
+       (is (nil? (:error result)) (pr-str result))
+       (is (= nsid (:nsid result)))
+       (is (= authority-did (:did result)))
+       (is (= (assoc lexicon-doc :$type resolver/lexicon-record-collection)
+              (:lexicon result)))
+       (is (string? (:cid result)))
+       (testing "the record is fetched as a sync.getRecord commit proof"
+         (is (str/includes? (:url (last requests))
+                            "/xrpc/com.atproto.sync.getRecord"))))))
+
+#?(:clj
+   (deftest verified-resolution-bad-signature-test
+     ;; the DID doc advertises a different key than the one that signed the
+     ;; commit: the proof must be rejected
+     (let [bad-keypair (repo-util/ok! (repo-util/result-of (crypto/generate "ES256K")))
+           env (proof-env :doc-keypair bad-keypair)
+           {:keys [result]} (resolve-with-stubs
+                             {:http-routes (verified-routes env)
+                              :opts {:verify? true}})]
+       (is (= "LexiconVerificationError" (:error result))))))
+
+#?(:clj
+   (deftest verified-resolution-absent-record-test
+     ;; a valid proof of the record's absence is not a usable lexicon record
+     (let [env (proof-env :with-record? false)
+           {:keys [result]} (resolve-with-stubs
+                             {:http-routes (verified-routes env)
+                              :opts {:verify? true}})]
+       (is (= "LexiconVerificationError" (:error result))))))
+
+#?(:clj
+   (deftest verified-resolution-validates-document-test
+     ;; proof verification does not bypass document validation
+     (let [env (proof-env :record {:$type resolver/lexicon-record-collection
+                                   :id nsid})
+           {:keys [result]} (resolve-with-stubs
+                             {:http-routes (verified-routes env)
+                              :opts {:verify? true}})]
+       (is (= "InvalidLexiconDocument" (:error result))))))
+
+#?(:clj
+   (deftest verified-resolution-missing-signing-key-test
+     ;; without a #atproto verification method, verified resolution fails
+     ;; (unverified resolution does not need the key)
+     (let [{:keys [result]} (resolve-with-stubs {:opts {:verify? true}})]
+       (is (= "LexiconResolutionError" (:error result)))
+       (is (str/includes? (:message result) "signing key")))))
+
 (deftest document-nsid-refs-test
   (is (= #{"com.example.test.other" "com.example.test.token"}
          (resolver/document-nsid-refs
@@ -317,7 +428,13 @@
        (is (= "app.bsky.feed.post" nsid))
        (is (= "app.bsky.feed.post" (:id lexicon)))
        (is (string? uri))
-       (is (string? cid)))))
+       (is (string? cid)))
+     (testing "verified resolution (sync.getRecord commit proof)"
+       (let [{:keys [error nsid lexicon] :as resp}
+             @(resolver/resolve-nsid "app.bsky.feed.post" :verify? true)]
+         (is (nil? error) (pr-str resp))
+         (is (= "app.bsky.feed.post" nsid))
+         (is (= "app.bsky.feed.post" (:id lexicon)))))))
 
 (deftest errors-not-cached-test
   (let [cache (resolver/memory-cache)

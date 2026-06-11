@@ -7,11 +7,12 @@
   `at://<did>/com.atproto.lexicon.schema/<nsid>` -> validated Lexicon
   document.
 
-  Trust model: records are fetched with `com.atproto.repo.getRecord` and are
-  NOT cryptographically verified against a repo commit proof (the SDK has no
-  CAR/MST/commit-signature support yet). The resolved `:uri` and `:cid` are
-  returned so proof verification can be layered on later without an API
-  change.
+  Trust model: by default records are fetched with
+  `com.atproto.repo.getRecord` and trusted as returned by the PDS. With
+  `:verify? true`, records are fetched as commit proofs via
+  `com.atproto.sync.getRecord` and cryptographically verified (CAR read,
+  commit signature against the DID document's #atproto signing key, MST
+  inclusion walk) before use, like the reference resolvers.
 
   See https://atproto.com/specs/lexicon#lexicon-publication-and-resolution"
   (:require [clojure.string :as str]
@@ -20,9 +21,13 @@
             [atproto.runtime.interceptor :as i]
             [atproto.runtime.dns :as dns]
             [atproto.runtime.cast :as cast]
+            [atproto.runtime.bytes :as bytes]
+            [atproto.data :as data]
+            [atproto.crypto :as crypto]
             [atproto.identity :as identity]
             [atproto.lexicon :as lexicon]
             [atproto.lexicon.schema :as-alias schema]
+            [atproto.repo.sync :as repo-sync]
             [atproto.xrpc.client :as xrpc]
             #?@(:clj [[clojure.java.io :as io]
                       [clojure.edn :as edn]
@@ -137,9 +142,135 @@
              :lexicon value}
       cid (assoc :cid cid))))
 
+(defn- did-doc-signing-did-key
+  "The did:key string for the DID document's #atproto verification method,
+  or nil.
+
+  Mirrors the reference's getKey/getDidKeyFromMultibase
+  (packages/identity/src/did/atproto-data.ts): Multikey verification methods
+  are parsed as multikeys; the legacy EcdsaSecp256r1VerificationKey2019 /
+  EcdsaSecp256k1VerificationKey2019 types carry a multibase-encoded public
+  key. To be superseded by WS-06's atproto.identity helper."
+  [did-doc]
+  (when-let [{:keys [type publicKeyMultibase]}
+             (->> (:verificationMethod did-doc)
+                  (filter #(some-> (:id %) (str/ends-with? "#atproto")))
+                  (first))]
+    (when publicKeyMultibase
+      (let [did-key
+            (case type
+              "Multikey"
+              (let [{:keys [alg bytes] :as parsed} (crypto/parse-multikey
+                                                    publicKeyMultibase)]
+                (when-not (:error parsed)
+                  (crypto/pubkey->did-key alg bytes)))
+
+              "EcdsaSecp256r1VerificationKey2019"
+              (let [key-bytes (crypto/multibase->bytes publicKeyMultibase)]
+                (when-not (:error key-bytes)
+                  (crypto/pubkey->did-key "ES256" key-bytes)))
+
+              "EcdsaSecp256k1VerificationKey2019"
+              (let [key-bytes (crypto/multibase->bytes publicKeyMultibase)]
+                (when-not (:error key-bytes)
+                  (crypto/pubkey->did-key "ES256K" key-bytes)))
+
+              nil)]
+        (when (string? did-key)
+          did-key)))))
+
+(defn- car-body->bytes
+  "Normalize a com.atproto.sync.getRecord response body to bytes (the JVM
+  HTTP client yields an InputStream for non-text content types)."
+  [body]
+  #?(:clj (cond
+            (bytes/bytes? body) body
+            (instance? java.io.InputStream body) (.readAllBytes ^java.io.InputStream body)
+            :else body)
+     :cljs body))
+
+(defn- fetch-lexicon-unverified
+  "Fetch the lexicon schema record with com.atproto.repo.getRecord (no
+  commit proof; the PDS is trusted) and validate it."
+  [nsid did pds cb]
+  (xrpc/query (xrpc/init {:service pds})
+              {:nsid "com.atproto.repo.getRecord"
+               :params {:repo did
+                        :collection lexicon-record-collection
+                        :rkey nsid}}
+              :callback
+              (fn [{:keys [error] :as resp}]
+                (if error
+                  (do
+                    (cast/dev {:message "Lexicon record fetch failed"
+                               :nsid nsid
+                               :did did
+                               :response resp})
+                    (cb {:error "LexiconResolutionError"
+                         :message (str "Could not fetch the lexicon record for "
+                                       nsid " from " pds
+                                       ": " (or (:message resp) error))
+                         :nsid nsid
+                         :did did}))
+                  (cb (validate-lexicon-record nsid did resp))))))
+
+(defn- fetch-lexicon-verified
+  "Fetch the lexicon schema record as a com.atproto.sync.getRecord commit
+  proof, verify it (commit signature against the authority's signing key +
+  MST inclusion), and validate the proven record."
+  [nsid did pds did-key cb]
+  (xrpc/query (xrpc/init {:service pds})
+              {:nsid "com.atproto.sync.getRecord"
+               :params {:did did
+                        :collection lexicon-record-collection
+                        :rkey nsid}}
+              :callback
+              (fn [resp]
+                (if (and (map? resp) (:error resp))
+                  (do
+                    (cast/dev {:message "Lexicon record proof fetch failed"
+                               :nsid nsid
+                               :did did
+                               :response resp})
+                    (cb {:error "LexiconResolutionError"
+                         :message (str "Could not fetch the lexicon record proof for "
+                                       nsid " from " pds
+                                       ": " (or (:message resp) (:error resp)))
+                         :nsid nsid
+                         :did did}))
+                  (repo-sync/verify-records
+                   (car-body->bytes resp) did did-key
+                   :callback
+                   (fn [records]
+                     (if (and (map? records) (:error records))
+                       (cb {:error "LexiconVerificationError"
+                            :message (str "Could not verify the lexicon record proof for "
+                                          nsid ": " (or (:message records)
+                                                        (:error records)))
+                            :nsid nsid
+                            :did did
+                            :cause records})
+                       (if-let [{:keys [cid value]}
+                                (->> records
+                                     (filter #(and (= lexicon-record-collection
+                                                      (:collection %))
+                                                   (= nsid (:rkey %))))
+                                     (first))]
+                         (cb (validate-lexicon-record
+                              nsid did
+                              {:uri (str "at://" did "/"
+                                         lexicon-record-collection "/" nsid)
+                               :cid (data/format-cid cid)
+                               :value value}))
+                         (cb {:error "LexiconVerificationError"
+                              :message (str "The record proof for " nsid
+                                            " does not include the lexicon record.")
+                              :nsid nsid
+                              :did did})))))))))
+
 (defn- fetch-lexicon
   "Fetch the lexicon schema record from the authority DID's PDS and validate it."
-  [nsid did cb]
+  [nsid did {:keys [verify?]} cb]
   (identity/resolve-did
    did
    :callback
@@ -150,31 +281,25 @@
                           ": " (or (:message resp) error))
             :nsid nsid
             :did did})
-       (if-let [pds (identity/did-doc-pds did-doc)]
-         (xrpc/query (xrpc/init {:service pds})
-                     {:nsid "com.atproto.repo.getRecord"
-                      :params {:repo did
-                               :collection lexicon-record-collection
-                               :rkey nsid}}
-                     :callback
-                     (fn [{:keys [error] :as resp}]
-                       (if error
-                         (do
-                           (cast/dev {:message "Lexicon record fetch failed"
-                                      :nsid nsid
-                                      :did did
-                                      :response resp})
-                           (cb {:error "LexiconResolutionError"
-                                :message (str "Could not fetch the lexicon record for "
-                                              nsid " from " pds
-                                              ": " (or (:message resp) error))
-                                :nsid nsid
-                                :did did}))
-                         (cb (validate-lexicon-record nsid did resp)))))
-         (cb {:error "LexiconResolutionError"
-              :message (str "The DID document for " did " has no PDS endpoint.")
-              :nsid nsid
-              :did did}))))))
+       (let [pds (identity/did-doc-pds did-doc)]
+         (cond
+           (not pds)
+           (cb {:error "LexiconResolutionError"
+                :message (str "The DID document for " did " has no PDS endpoint.")
+                :nsid nsid
+                :did did})
+
+           (not verify?)
+           (fetch-lexicon-unverified nsid did pds cb)
+
+           :else
+           (if-let [did-key (did-doc-signing-did-key did-doc)]
+             (fetch-lexicon-verified nsid did pds did-key cb)
+             (cb {:error "LexiconResolutionError"
+                  :message (str "The DID document for " did
+                                " has no usable #atproto signing key.")
+                  :nsid nsid
+                  :did did}))))))))
 
 (defn memory-cache
   "A simple atom-backed cache for resolve-nsid. Optional :ttl-ms."
@@ -211,6 +336,10 @@
 
   Options:
   :did-authority  Skip DNS and use this DID as the authority.
+  :verify?        Fetch the record as a com.atproto.sync.getRecord commit
+                  proof and cryptographically verify it (commit signature
+                  against the DID document's #atproto signing key + MST
+                  inclusion) instead of trusting the PDS.
   :cache          A cache from `memory-cache`; a hit short-circuits the network.
   :force-refresh  Bypass and repopulate the cache.
 
@@ -218,21 +347,23 @@
   Success: {:nsid nsid
             :did \"did:...\"        ; authority
             :uri \"at://did:.../com.atproto.lexicon.schema/<nsid>\"
-            :cid \"bafy...\"        ; from the getRecord response, when present
+            :cid \"bafy...\"        ; from the getRecord response/proof, when present
             :lexicon {...}}         ; the schema document (Clojure map)
   Errors:  {:error \"InvalidNsid\" :message ...}
            {:error \"LexiconAuthorityNotFound\" ...}
            {:error \"LexiconResolutionError\" :message ... :nsid ...}   ; DID/PDS/fetch failures
+           {:error \"LexiconVerificationError\" :message ... :nsid ...} ; proof verification (:verify?)
            {:error \"InvalidLexiconDocument\" :message ... :nsid ... :explain-data ...}
            {:error \"LexiconNsidMismatch\" :message ... :nsid ... :id ...}"
-  [nsid & {:keys [did-authority cache force-refresh] :as opts}]
+  [nsid & {:keys [did-authority verify? cache force-refresh] :as opts}]
   (let [[cb val] (i/platform-async (select-keys opts [:callback :promise :channel]))
         cb (if cache
              (fn [{:keys [error] :as resp}]
                (when-not error
                  (cache-store! cache nsid resp))
                (cb resp))
-             cb)]
+             cb)
+        fetch-opts {:verify? verify?}]
     (cond
       (not (lexicon/parse-nsid nsid))
       (cb {:error "InvalidNsid"
@@ -244,13 +375,13 @@
                            (cache-lookup cache nsid))]
         (cb cached)
         (if did-authority
-          (fetch-lexicon nsid did-authority cb)
+          (fetch-lexicon nsid did-authority fetch-opts cb)
           (resolve-nsid-authority nsid
                                   :callback
                                   (fn [{:keys [error did] :as resp}]
                                     (if error
                                       (cb resp)
-                                      (fetch-lexicon nsid did cb)))))))
+                                      (fetch-lexicon nsid did fetch-opts cb)))))))
     val))
 
 ;; -----------------------------------------------------------------------------
@@ -332,13 +463,13 @@
      :deps?  when true, recursively install schemas referenced by ref/union/
              knownValues until fixpoint.
      plus resolve-nsid options (:did-authority — applied to `nsid` only —
-     :cache, :force-refresh).
+     :verify?, :cache, :force-refresh).
 
      Synchronous; returns {:installed [nsid ...]} or {:error ...}.
      Updates <dir>/manifest.edn with the installed files and their
      {:uri ... :cid ...} resolutions."
      [nsid & {:keys [dir deps?] :or {dir "resources/lexicons"} :as opts}]
-     (let [shared-opts (select-keys opts [:cache :force-refresh])]
+     (let [shared-opts (select-keys opts [:verify? :cache :force-refresh])]
        (loop [queue [nsid]
               seen #{}
               entries []]
