@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented (milestones 1–7; CLJS datetime/http bodies deferred to WS-10 as planned) |
 | **Priority** | P1 |
 | **Estimated size** | L |
 | **Branch** | ws/07-xrpc-client-ergonomics |
@@ -524,13 +524,13 @@ Already vendored under `test/interop-test-files/syntax/` (consumed via the `inte
 
 Each is an independently mergeable, green PR.
 
-1. **TID fixes & API** — `src/atproto/tid.cljc` (padding fix, parse/compare/from-time/valid?), `test/atproto/tid_test.cljc`, fixture refresh if needed. No dependencies.
-2. **AT-URI namespace** — `src/atproto/at_uri.cljc` + tests. No dependencies.
-3. **Datetime helpers (CLJ)** — `src/atproto/runtime/datetime.cljc` additions + tests; signatures pre-agreed with WS-10. No dependencies.
-4. **Error taxonomy + retry runtime** — new `atproto.xrpc.error` + `atproto.runtime.retry` namespaces with full unit tests; *not yet wired into the client* (pure additions, mergeable even before WS-01).
-5. **Client wiring: errors, headers, proxy/labelers** *(after WS-01 merges; rebase)* — modify `src/atproto/xrpc/client.cljc` (`handle-xrpc-response` → error ns, success-headers metadata, header merge, `with-service-proxy`/`with-labelers`, non-throwing `request-validator`), docstring updates in `src/atproto/client.cljc`, `test/atproto/xrpc/client_test.cljc`.
-6. **Timeout, retry, cancellation** — `:timeout`/`:max-retries`/`:signal` request opts, `abort-signal`/`abort!`, CLJS `http.cljc` timeout/abort support, tests.
-7. **Pagination + repo conveniences** — `fetch-pages`/`fetch-all`/`page-seq` in the xrpc client; new `src/atproto/client/repo.cljc` + `test/atproto/client/repo_test.cljc` (ns `atproto.client.repo`; naming agreement with WS-04 confirmed before this milestone lands — see File ownership); live-verification notes in the PR description.
+1. ✅ **TID fixes & API** — `src/atproto/tid.cljc` (padding fix, parse/compare/from-time/valid?), `test/atproto/tid_test.cljc`, fixture refresh if needed. No dependencies. *(Done; fixtures diffed against upstream, no refresh needed.)*
+2. ✅ **AT-URI namespace** — `src/atproto/at_uri.cljc` + tests. No dependencies.
+3. ✅ **Datetime helpers (CLJ)** — `src/atproto/runtime/datetime.cljc` additions + tests; signatures pre-agreed with WS-10. No dependencies. *(CLJS bodies stubbed as `{:error "NotImplemented"}` per the WS-10 contract.)*
+4. ✅ **Error taxonomy + retry runtime** — new `atproto.xrpc.error` + `atproto.runtime.retry` namespaces with full unit tests; *not yet wired into the client* (pure additions, mergeable even before WS-01). *(The abort-signal primitives live in `atproto.runtime.retry`; `atproto.xrpc.client/abort-signal`/`abort!` delegate to them.)*
+5. ✅ **Client wiring: errors, headers, proxy/labelers** *(after WS-01 merges; rebase)* — modify `src/atproto/xrpc/client.cljc` (`handle-xrpc-response` → error ns, success-headers metadata, header merge, `with-service-proxy`/`with-labelers`, non-throwing `request-validator`), docstring updates in `src/atproto/client.cljc`, `test/atproto/xrpc/client_test.cljc`. *(Done on top of WS-01's merged client; success headers readable via `atproto.xrpc.client/response-headers`.)*
+6. ✅ **Timeout, retry, cancellation** — `:timeout`/`:max-retries`/`:signal` request opts, `abort-signal`/`abort!`, CLJS `http.cljc` timeout/abort support, tests.
+7. ✅ **Pagination + repo conveniences** — `fetch-pages`/`fetch-all`/`page-seq` in the xrpc client; new `src/atproto/client/repo.cljc` + `test/atproto/client/repo_test.cljc` (ns `atproto.client.repo`; naming agreement with WS-04 confirmed before this milestone lands — see File ownership); live-verification notes in the PR description. *(Live verification against bsky.social not run from CI; see Test plan.)*
 
 ## Risks & open questions
 
