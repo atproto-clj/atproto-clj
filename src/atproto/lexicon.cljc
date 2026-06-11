@@ -1133,6 +1133,38 @@
             (map #(json/read-str (slurp %)))
             lexicon))))
 
+#?(:clj
+   (defmacro embed-resources!
+     "Read all the lexicon JSON files listed in <resource-path>/manifest.edn
+     at macro-expansion time and emit code that registers them at load time.
+
+     Usable from ClojureScript (the resource IO happens on the compiling
+     JVM), so cljs builds get bundled schemas without runtime IO or eval.
+     The JVM can keep using load-resources! at runtime instead.
+
+     Expands to a top-level `do` with one registration per schema; use it at
+     the top level of a namespace so the compiler processes the forms
+     separately (a single form embedding every schema would exceed the JVM
+     method size limit)."
+     [resource-path]
+     (let [manifest-resource (io/resource (str resource-path "/manifest.edn"))]
+       (when-not manifest-resource
+         (throw (ex-info (str "No manifest.edn found at resource path: " resource-path)
+                         {:resource-path resource-path})))
+       (let [schemas (->> (:files (edn/read-string (slurp manifest-resource)))
+                          (mapv (fn [file]
+                                  (let [path (str resource-path "/" file)]
+                                    (if-let [resource (io/resource path)]
+                                      (json/read-str (slurp resource))
+                                      (throw (ex-info (str "Lexicon resource listed in the"
+                                                           " manifest was not found: " path)
+                                                      {:path path})))))))]
+         `(do
+            ~@(map (fn [schema]
+                     `(register-specs! (lexicon ['~schema])))
+                   schemas)
+            nil)))))
+
 (defn register-specs!
   "Register validators for every schema in this Lexicon.
 

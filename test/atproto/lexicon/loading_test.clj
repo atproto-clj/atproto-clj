@@ -49,6 +49,28 @@
         (is (not ((lexicon/registered-validator :app.bsky.feed/post)
                   (dissoc post :text))))))))
 
+;; expanding at compile time of this namespace (top level, so the emitted
+;; do-forms compile separately) and evaluating registers the bundled schemas
+(lexicon/embed-resources! "lexicons")
+
+(deftest embed-resources-expansion-test
+  ;; the macro reads the resources on the compiling JVM and emits literal
+  ;; schema data + registration calls: no runtime IO, no eval (cljs-safe)
+  (let [[do-op & forms] (macroexpand-1 `(lexicon/embed-resources! "lexicons"))
+        registrations (butlast forms)]
+    (is (= 'do do-op))
+    (is (= 251 (count registrations)))
+    (is (every? (fn [[register-op [lexicon-op [quoted-schema]]]]
+                  (and (= `lexicon/register-specs! register-op)
+                       (= `lexicon/lexicon lexicon-op)
+                       (= 'quote (first quoted-schema))
+                       (= 1 (:lexicon (second quoted-schema)))))
+                registrations))))
+
+(deftest embed-resources-registration-test
+  (is (fn? (lexicon/registered-validator :app.bsky.actor/profile)))
+  (is (fn? (lexicon/registered-validator :com.atproto.lexicon/schema))))
+
 (deftest jar-loading-test
   (let [jar-file (File/createTempFile "atproto-lexicons" ".jar")
         schema {:lexicon 1

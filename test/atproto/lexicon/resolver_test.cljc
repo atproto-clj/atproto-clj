@@ -7,10 +7,13 @@
   atproto.runtime.http/handle-request with the routed fake."
   (:require #?(:clj [clojure.test :refer :all]
                :cljs [cljs.test :refer :all])
+            #?@(:clj [[clojure.java.io :as io]
+                      [clojure.edn :as edn]])
             [clojure.string :as str]
             [atproto.runtime.interceptor :as i]
             [atproto.runtime.http :as http]
             [atproto.runtime.dns :as dns]
+            [atproto.runtime.json :as json]
             [atproto.test-support.http :as fake-http]
             [atproto.lexicon.resolver :as resolver]))
 
@@ -209,6 +212,99 @@
     (let [second-pass (resolve-with-stubs {:opts {:cache cache}})]
       (is (nil? (:error (:result second-pass))))
       (is (= 2 (count (:requests second-pass)))))))
+
+(deftest document-nsid-refs-test
+  (is (= #{"com.example.test.other" "com.example.test.token"}
+         (resolver/document-nsid-refs
+          {:lexicon 1
+           :id "com.example.test.record"
+           :defs {:main {:type "record"
+                         :key "tid"
+                         :record {:type "object"
+                                  :properties
+                                  {:self {:type "ref" :ref "#local"}
+                                   :other {:type "ref" :ref "com.example.test.other#thing"}
+                                   :selfRef {:type "ref" :ref "com.example.test.record#local"}
+                                   :u {:type "union"
+                                       :refs ["#local" "com.example.test.other"]}
+                                   :kv {:type "string"
+                                        :knownValues ["com.example.test.token#a"
+                                                      "not an nsid"]}}}}
+                  :local {:type "object" :properties {}}}}))))
+
+#?(:clj
+   (deftest install-test
+     (let [dir (str (System/getProperty "java.io.tmpdir")
+                    "/atproto-install-test-" (System/nanoTime))
+           {:keys [handler]} (fake-http/routed (routes))]
+       (with-redefs [dns/interceptor (stub-dns
+                                      {"_lexicon.test.example.com"
+                                       {:values [(str "did=" authority-did)]}})
+                     http/handle-request handler]
+         (let [result (resolver/install! nsid :dir dir)]
+           (is (= {:installed [nsid]} result))
+           (let [file (io/file dir "com/example/test/record.json")]
+             (is (.exists file))
+             (is (= lexicon-doc (json/read-str (slurp file)))))
+           (let [manifest (edn/read-string (slurp (io/file dir "manifest.edn")))]
+             (is (= ["com/example/test/record.json"] (:files manifest)))
+             (is (= (str "at://" authority-did "/"
+                         resolver/lexicon-record-collection "/" nsid)
+                    (get-in manifest [:resolved nsid :uri])))
+             (is (string? (get-in manifest [:resolved nsid :cid])))))))))
+
+#?(:clj
+   (deftest install-deps-test
+     (let [dir (str (System/getProperty "java.io.tmpdir")
+                    "/atproto-install-deps-test-" (System/nanoTime))
+           other-nsid "com.example.test.other"
+           ;; root and dep reference each other: :deps? must reach fixpoint
+           root-doc {:lexicon 1
+                     :id nsid
+                     :defs {:main {:type "record"
+                                   :key "tid"
+                                   :record {:type "object"
+                                            :properties
+                                            {:other {:type "ref"
+                                                     :ref (str other-nsid "#thing")}}}}}}
+           other-doc {:lexicon 1
+                      :id other-nsid
+                      :defs {:thing {:type "object"
+                                     :properties
+                                     {:back {:type "ref" :ref nsid}}}}}
+           {:keys [handler]} (fake-http/routed
+                              [["plc.directory" (fake-http/json-response did-doc)]
+                               [(fn [{:keys [url query-params]}]
+                                  (and (str/includes? url "getRecord")
+                                       (= nsid (:rkey query-params))))
+                                (get-record-response root-doc)]
+                               [(fn [{:keys [url query-params]}]
+                                  (and (str/includes? url "getRecord")
+                                       (= other-nsid (:rkey query-params))))
+                                (get-record-response other-doc)]])]
+       (with-redefs [dns/interceptor (stub-dns
+                                      {"_lexicon.test.example.com"
+                                       {:values [(str "did=" authority-did)]}})
+                     http/handle-request handler]
+         (let [result (resolver/install! nsid :dir dir :deps? true)]
+           (is (= [nsid other-nsid] (:installed result)))
+           (is (.exists (io/file dir "com/example/test/record.json")))
+           (is (.exists (io/file dir "com/example/test/other.json")))
+           (let [manifest (edn/read-string (slurp (io/file dir "manifest.edn")))]
+             (is (= ["com/example/test/other.json"
+                     "com/example/test/record.json"]
+                    (:files manifest)))))))))
+
+#?(:clj
+   (deftest install-error-test
+     (let [dir (str (System/getProperty "java.io.tmpdir")
+                    "/atproto-install-error-test-" (System/nanoTime))
+           {:keys [handler]} (fake-http/routed [])]
+       (with-redefs [dns/interceptor (stub-dns {})
+                     http/handle-request handler]
+         (let [result (resolver/install! nsid :dir dir)]
+           (is (= "LexiconAuthorityNotFound" (:error result)))
+           (is (not (.exists (io/file dir "manifest.edn")))))))))
 
 (deftest errors-not-cached-test
   (let [cache (resolver/memory-cache)

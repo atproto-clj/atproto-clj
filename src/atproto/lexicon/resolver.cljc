@@ -16,13 +16,18 @@
   See https://atproto.com/specs/lexicon#lexicon-publication-and-resolution"
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
+            [clojure.walk :as walk]
             [atproto.runtime.interceptor :as i]
             [atproto.runtime.dns :as dns]
             [atproto.runtime.cast :as cast]
             [atproto.identity :as identity]
             [atproto.lexicon :as lexicon]
             [atproto.lexicon.schema :as-alias schema]
-            [atproto.xrpc.client :as xrpc]))
+            [atproto.xrpc.client :as xrpc]
+            #?@(:clj [[clojure.java.io :as io]
+                      [clojure.edn :as edn]
+                      [clojure.pprint :as pprint]
+                      [charred.api :as charred]])))
 
 (def lexicon-record-collection "com.atproto.lexicon.schema")
 
@@ -247,3 +252,119 @@
                                       (cb resp)
                                       (fetch-lexicon nsid did cb)))))))
     val))
+
+;; -----------------------------------------------------------------------------
+;; Installer (dev helper)
+;; -----------------------------------------------------------------------------
+
+(defn document-nsid-refs
+  "The NSIDs referenced by this schema document, excluding its own id.
+
+  Walks every def for refs (ref, union refs, string knownValues token refs)
+  and returns the set of NSIDs they point to, à la the TS lex installer's
+  listDocumentNsidRefs."
+  [doc]
+  (let [refs (volatile! #{})]
+    (walk/postwalk
+     (fn [x]
+       (when (map? x)
+         (when (string? (:ref x))
+           (vswap! refs conj (:ref x)))
+         (when (= "union" (:type x))
+           (doseq [r (:refs x)]
+             (when (string? r)
+               (vswap! refs conj r))))
+         (when (= "string" (:type x))
+           (doseq [r (:knownValues x)]
+             (when (string? r)
+               (vswap! refs conj r)))))
+       x)
+     doc)
+    (->> @refs
+         (keep #(let [nsid (first (str/split % #"#"))]
+                  (when (and (seq nsid)
+                             (lexicon/parse-nsid nsid))
+                    nsid)))
+         (remove #{(:id doc)})
+         (set))))
+
+#?(:clj
+   (defn- nsid->relative-path
+     "The installed file path for this NSID (app.bsky.feed.post ->
+     app/bsky/feed/post.json)."
+     [nsid]
+     (str (str/join "/" (str/split nsid #"\.")) ".json")))
+
+#?(:clj
+   (defn- update-manifest!
+     "Record installed schemas in <dir>/manifest.edn: each file is added to
+     :files (distinct, sorted) and its resolution under
+     :resolved {nsid {:uri ... :cid ...}}."
+     [dir entries]
+     (let [manifest-file (io/file dir "manifest.edn")
+           manifest (if (.exists manifest-file)
+                      (edn/read-string (slurp manifest-file))
+                      {})
+           manifest (-> manifest
+                        (update :files
+                                #(->> (concat % (map :path entries))
+                                      (distinct)
+                                      (sort)
+                                      (vec)))
+                        (update :resolved
+                                merge
+                                (into {}
+                                      (map (fn [{:keys [nsid uri cid]}]
+                                             [nsid (cond-> {:uri uri}
+                                                     cid (assoc :cid cid))]))
+                                      entries)))]
+       (io/make-parents manifest-file)
+       (spit manifest-file (with-out-str (pprint/pprint manifest))))))
+
+#?(:clj
+   (defn install!
+     "Dev helper: resolve `nsid` and write its schema document as JSON under
+     `dir`, mirroring the NSID hierarchy (app.bsky.feed.post ->
+     app/bsky/feed/post.json), à la the TS lex CLI installer.
+
+     Options:
+     :dir    target directory (default \"resources/lexicons\")
+     :deps?  when true, recursively install schemas referenced by ref/union/
+             knownValues until fixpoint.
+     plus resolve-nsid options (:did-authority — applied to `nsid` only —
+     :cache, :force-refresh).
+
+     Synchronous; returns {:installed [nsid ...]} or {:error ...}.
+     Updates <dir>/manifest.edn with the installed files and their
+     {:uri ... :cid ...} resolutions."
+     [nsid & {:keys [dir deps?] :or {dir "resources/lexicons"} :as opts}]
+     (let [shared-opts (select-keys opts [:cache :force-refresh])]
+       (loop [queue [nsid]
+              seen #{}
+              entries []]
+         (if-let [current (first queue)]
+           (if (seen current)
+             (recur (rest queue) seen entries)
+             (let [resolve-opts (cond-> shared-opts
+                                  ;; the DID authority override only applies to
+                                  ;; the requested NSID; deps resolve via DNS
+                                  (and (= current nsid) (:did-authority opts))
+                                  (assoc :did-authority (:did-authority opts)))
+                   {:keys [error lexicon uri cid] :as resp}
+                   (deref (apply resolve-nsid current (mapcat identity resolve-opts)))]
+               (if error
+                 resp
+                 (let [path (nsid->relative-path current)
+                       file (io/file dir path)]
+                   (io/make-parents file)
+                   (spit file (charred/write-json-str lexicon :indent-str "  "))
+                   (recur (cond-> (rest queue)
+                            deps? (concat (remove seen (document-nsid-refs lexicon))))
+                          (conj seen current)
+                          (conj entries {:nsid current
+                                         :path path
+                                         :uri uri
+                                         :cid cid}))))))
+           (do
+             (update-manifest! dir entries)
+             {:installed (mapv :nsid entries)}))))))
