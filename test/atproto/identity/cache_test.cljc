@@ -4,62 +4,86 @@
   stale-serve+revalidate, expired-forces-refresh."
   (:require #?(:clj [clojure.test :refer :all]
                :cljs [cljs.test :refer :all])
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
             [atproto.runtime.http :as http]
             [atproto.test-support.http :as fake-http]
             [atproto.identity :as identity]
             [atproto.identity.cache :as cache]))
 
+(def minute (* 1000 60))
 (def hour (* 1000 60 60))
 
-(deftest memory-cache-test
-  (let [c (cache/memory-cache)]
-    (is (nil? (cache/get* c "k")))
-    (cache/set* c "k" {:val 1 :updated-at 123})
-    (is (= {:val 1 :updated-at 123} (cache/get* c "k")))
-    (cache/set* c "k2" {:val 2 :updated-at 456})
-    (cache/del* c "k")
-    (is (nil? (cache/get* c "k")))
-    (is (some? (cache/get* c "k2")))
-    (cache/clear* c)
-    (is (nil? (cache/get* c "k2")))))
+;; -----------------------------------------------------------------------------
+;; Generative properties
+;; -----------------------------------------------------------------------------
 
-(deftest check-classification-test
-  (let [c (cache/memory-cache)
-        policy cache/default-policy
-        now (cache/now-ms)]
-    (testing "miss"
-      (is (nil? (cache/check c policy "missing"))))
-    (testing "fresh"
-      (cache/set* c "fresh" {:val :doc :updated-at now})
-      (is (= {:val :doc :stale? false :expired? false :negative? false}
-             (dissoc (cache/check c policy "fresh") :updated-at))))
-    (testing "stale but not expired"
-      (cache/set* c "stale" {:val :doc :updated-at (- now (* 2 hour))})
-      (is (= {:val :doc :stale? true :expired? false :negative? false}
-             (dissoc (cache/check c policy "stale") :updated-at))))
-    (testing "expired"
-      (cache/set* c "expired" {:val :doc :updated-at (- now (* 25 hour))})
-      (is (= {:val :doc :stale? true :expired? true :negative? false}
-             (dissoc (cache/check c policy "expired") :updated-at))))
-    (testing "negative entries expire by :negative-ttl"
-      (cache/set* c "neg" {:val nil :negative? true :updated-at now})
-      ;; nil :negative-ttl (the default): always expired
-      (is (true? (:expired? (cache/check c policy "neg"))))
-      (is (= {:val nil :stale? false :expired? false :negative? true}
-             (dissoc (cache/check c (assoc policy :negative-ttl hour) "neg")
-                     :updated-at)))
-      (cache/set* c "neg" {:val nil :negative? true :updated-at (- now (* 2 hour))})
-      (is (true? (:expired? (cache/check c (assoc policy :negative-ttl hour) "neg")))))))
+(def gen-cache-op
+  "An operation against a small key space, for model-based testing."
+  (let [gen-key (gen/elements ["a" "b" "c" "d"])]
+    (gen/one-of [(gen/tuple (gen/return :set) gen-key gen/small-integer)
+                 (gen/tuple (gen/return :del) gen-key)
+                 (gen/return [:clear])])))
 
-(deftest store-negative-honors-policy-test
-  (let [c (cache/memory-cache)]
-    (cache/store c "k" :doc)
-    (testing "disabled by default: evicts instead"
-      (cache/store-negative c cache/default-policy "k")
-      (is (nil? (cache/get* c "k"))))
-    (testing "enabled: stores a marker"
-      (cache/store-negative c {:negative-ttl hour} "k")
-      (is (true? (:negative? (cache/get* c "k")))))))
+(defspec memory-cache-model-spec 100
+  ;; memory-cache behaves exactly like a map under set*/del*/clear*
+  (prop/for-all [ops (gen/vector gen-cache-op 0 25)]
+    (let [c (cache/memory-cache)
+          model (reduce (fn [m [op k v]]
+                          (case op
+                            :set (do (cache/set* c k {:val v :updated-at 0})
+                                     (assoc m k {:val v :updated-at 0}))
+                            :del (do (cache/del* c k)
+                                     (dissoc m k))
+                            :clear (do (cache/clear* c)
+                                       {})))
+                        {} ops)]
+      (every? (fn [k] (= (get model k) (cache/get* c k)))
+              ["a" "b" "c" "d" "missing"]))))
+
+;; TTLs in whole minutes with entry ages offset by 30s, so the few ms
+;; between set* and check can never flip a comparison.
+(defspec check-classification-spec 100
+  (prop/for-all [age-min (gen/choose 0 (* 2 24 60))
+                 stale-min (gen/choose 1 (* 24 60))
+                 max-min (gen/choose 1 (* 2 24 60))
+                 negative? gen/boolean
+                 negative-min (gen/one-of [(gen/return nil)
+                                           (gen/choose 1 (* 24 60))])]
+    (let [c (cache/memory-cache)
+          policy {:stale-ttl (* stale-min minute)
+                  :max-ttl (* max-min minute)
+                  :negative-ttl (some-> negative-min (* minute))}
+          age (+ (* age-min minute) (* 30 1000))
+          _ (cache/set* c "k" (cond-> {:val :doc
+                                       :updated-at (- (cache/now-ms) age)}
+                                negative? (assoc :negative? true)))
+          result (cache/check c policy "k")
+          expected-expired? (if negative?
+                              (or (nil? negative-min) (< (* negative-min minute) age))
+                              (< (* max-min minute) age))
+          expected-stale? (if negative?
+                            expected-expired?
+                            (< (* stale-min minute) age))]
+      (and (nil? (cache/check c policy "missing"))
+           (= {:val :doc
+               :stale? expected-stale?
+               :expired? expected-expired?
+               :negative? negative?}
+              (dissoc result :updated-at))))))
+
+(defspec store-negative-policy-spec 50
+  ;; a negative marker is stored iff the policy enables negative caching;
+  ;; otherwise the existing entry is evicted
+  (prop/for-all [negative-min (gen/one-of [(gen/return nil)
+                                           (gen/choose 1 (* 24 60))])]
+    (let [c (cache/memory-cache)]
+      (cache/store c "k" :doc)
+      (cache/store-negative c {:negative-ttl (some-> negative-min (* minute))} "k")
+      (if negative-min
+        (true? (:negative? (cache/get* c "k")))
+        (nil? (cache/get* c "k"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; resolve-did / resolve-identity integration (stubbed HTTP)

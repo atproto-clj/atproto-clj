@@ -4,10 +4,15 @@
             #?(:clj [clojure.java.io :as io])
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
             [atproto.runtime.http :as http]
             [atproto.runtime.json :as json]
             [atproto.test-support.http :as fake-http]
+            [atproto.test-support.gen :as tsg]
             [atproto.crypto :as crypto]
+            [atproto.data :as data]
             [atproto.data.cbor :as cbor]
             [atproto.identity.plc :as plc]))
 
@@ -19,45 +24,95 @@
 (def legacy-did "did:plc:yk4dd2qkboz2yv6tpubpc6co")
 (def modern-did "did:plc:ewvi7nxzyoun6zhxrhs64oiz")
 
-(def sample-operation
-  {:type "plc_operation"
-   :rotationKeys ["did:key:zQ3shhCGUqDKjStzuDxPkTxN6ujddP4RkEKJJouJGRRkaLGbg"]
-   :verificationMethods {:atproto "did:key:zQ3shunBKsXixLxKtC5qeSG9E4J5RkGN57im31pcTzbNQnm5w"}
-   :alsoKnownAs ["at://alice.test"]
-   :services {:atproto_pds {:type "AtprotoPersonalDataServer"
-                            :endpoint "https://pds.test"}}
-   :prev nil
-   :sig "dGVzdA"})
+;; -----------------------------------------------------------------------------
+;; Generators
+;; -----------------------------------------------------------------------------
 
-(def sample-tombstone
-  {:type "plc_tombstone"
-   :prev "bafyreihltcnuuyqp2jm24aqydpnlj7b6w3ogwrplomrjtg5rifv44mmjey"
-   :sig "dGVzdA"})
+(def gen-cid
+  "Real CIDv1 dag-cbor strings (of tiny synthetic operations)."
+  (gen/fmap #(plc/cid-for-op {:n %}) gen/nat))
+
+(def gen-unsigned-operation
+  (gen/let [rotation (gen/vector tsg/did-key 1 5)
+            vm (gen/map (gen/elements [:atproto :signer :labeler]) tsg/did-key
+                        {:max-elements 3})
+            aka (gen/vector (gen/fmap #(str "at://" %) tsg/hostname) 0 3)
+            endpoint tsg/hostname
+            prev (gen/one-of [(gen/return nil) gen-cid])]
+    {:type "plc_operation"
+     :rotationKeys rotation
+     :verificationMethods vm
+     :alsoKnownAs aka
+     :services {:atproto_pds {:type "AtprotoPersonalDataServer"
+                              :endpoint (str "https://" endpoint)}}
+     :prev prev}))
+
+(def gen-operation
+  (gen/let [op gen-unsigned-operation
+            sig tsg/base64url]
+    (assoc op :sig sig)))
+
+(def gen-tombstone
+  (gen/let [prev gen-cid
+            sig tsg/base64url]
+    {:type "plc_tombstone" :prev prev :sig sig}))
+
+(def gen-legacy-case
+  "A legacy create op plus the handle/endpoint its normalization must
+  produce (handles may arrive bare, at://-, or http(s)://-prefixed)."
+  (gen/let [signing-key tsg/did-key
+            recovery-key tsg/did-key
+            handle-host tsg/hostname
+            handle-style (gen/elements [:bare :at :https])
+            service-host tsg/hostname
+            service-style (gen/elements [:bare :http :https])
+            sig (gen/one-of [(gen/return nil) tsg/base64url])]
+    {:legacy (cond-> {:type "create"
+                      :signingKey signing-key
+                      :recoveryKey recovery-key
+                      :handle (case handle-style
+                                :bare handle-host
+                                :at (str "at://" handle-host)
+                                :https (str "https://" handle-host))
+                      :service (case service-style
+                                 :bare service-host
+                                 :http (str "http://" service-host)
+                                 :https (str "https://" service-host))
+                      :prev nil}
+               sig (assoc :sig sig))
+     :expected-handle (str "at://" handle-host)
+     :expected-endpoint (case service-style
+                          :bare (str "https://" service-host)
+                          :http (str "http://" service-host)
+                          :https (str "https://" service-host))}))
 
 ;; -----------------------------------------------------------------------------
 ;; Specs
 ;; -----------------------------------------------------------------------------
 
-(deftest operation-spec-test
-  (is (s/valid? ::plc/operation sample-operation))
-  (is (s/valid? ::plc/op sample-operation))
-  (testing "rotation keys are 1-5 did:keys"
-    (is (not (s/valid? ::plc/operation (assoc sample-operation :rotationKeys []))))
-    (is (not (s/valid? ::plc/operation
-                       (assoc sample-operation
-                              :rotationKeys (vec (repeat 6 "did:key:zQ3shhCGUqDKjStzuDxPkTxN6ujddP4RkEKJJouJGRRkaLGbg"))))))
-    (is (not (s/valid? ::plc/operation (assoc sample-operation :rotationKeys ["not-a-did-key"])))))
-  (testing "missing required fields"
-    (doseq [k [:type :rotationKeys :verificationMethods :alsoKnownAs :services :prev :sig]]
-      (is (not (s/valid? ::plc/operation (dissoc sample-operation k))) (str k)))))
+(defspec operation-spec-spec 100
+  (prop/for-all [op gen-operation
+                 missing (gen/elements [:type :rotationKeys :verificationMethods
+                                        :alsoKnownAs :services :prev :sig])]
+    (and (s/valid? ::plc/operation op)
+         (s/valid? ::plc/op op)
+         (not (s/valid? ::plc/operation (dissoc op missing)))
+         ;; rotation keys are 1-5 did:keys
+         (not (s/valid? ::plc/operation (assoc op :rotationKeys [])))
+         (not (s/valid? ::plc/operation
+                        (assoc op :rotationKeys
+                               (vec (repeat 6 (first (:rotationKeys op)))))))
+         (not (s/valid? ::plc/operation (assoc op :rotationKeys ["not-a-did-key"]))))))
 
-(deftest tombstone-spec-test
-  (is (s/valid? ::plc/tombstone sample-tombstone))
-  (is (s/valid? ::plc/op sample-tombstone))
-  (testing "tombstones are strict: no extra keys, prev required"
-    (is (not (s/valid? ::plc/tombstone (assoc sample-tombstone :extra "key"))))
-    (is (not (s/valid? ::plc/tombstone (dissoc sample-tombstone :prev))))
-    (is (not (s/valid? ::plc/tombstone (assoc sample-tombstone :prev nil))))))
+(defspec tombstone-spec-spec 100
+  (prop/for-all [ts gen-tombstone
+                 extra-key (gen/elements [:services :handle :foo])]
+    (and (s/valid? ::plc/tombstone ts)
+         (s/valid? ::plc/op ts)
+         ;; tombstones are strict: exactly {:type :prev :sig}
+         (not (s/valid? ::plc/tombstone (assoc ts extra-key "x")))
+         (not (s/valid? ::plc/tombstone (dissoc ts :prev)))
+         (not (s/valid? ::plc/tombstone (assoc ts :prev nil))))))
 
 #?(:clj
    (deftest fixture-spec-test
@@ -73,34 +128,67 @@
 ;; normalize-op
 ;; -----------------------------------------------------------------------------
 
+(defspec normalize-op-spec 100
+  ;; ref: operations.ts normalizeOp
+  (prop/for-all [{:keys [legacy expected-handle expected-endpoint]} gen-legacy-case
+                 op gen-operation
+                 ts gen-tombstone]
+    (let [n (plc/normalize-op legacy)]
+      (and (= "plc_operation" (:type n))
+           (= [(:recoveryKey legacy) (:signingKey legacy)] (:rotationKeys n))
+           (= {:atproto (:signingKey legacy)} (:verificationMethods n))
+           (= [expected-handle] (:alsoKnownAs n))
+           (= {:atproto_pds {:type "AtprotoPersonalDataServer"
+                             :endpoint expected-endpoint}}
+              (:services n))
+           (nil? (:prev n))
+           ;; signature presence is preserved, never invented
+           (= (contains? legacy :sig) (contains? n :sig))
+           (or (not (contains? legacy :sig))
+               (s/valid? ::plc/operation n))
+           ;; idempotent; plc_operation and tombstones pass through
+           (= n (plc/normalize-op n))
+           (= op (plc/normalize-op op))
+           (= ts (plc/normalize-op ts))))))
+
 #?(:clj
-   (deftest normalize-op-test
+   (deftest normalize-op-fixture-test
+     ;; real-world legacy create op from the vendored audit log
      (let [legacy (:operation (first (fixture "audit-log-legacy.json")))]
-       (testing "legacy create -> plc_operation (ref: operations.ts normalizeOp)"
-         (is (= {:type "plc_operation"
-                 :verificationMethods {:atproto (:signingKey legacy)}
-                 :rotationKeys [(:recoveryKey legacy) (:signingKey legacy)]
-                 :alsoKnownAs [(str "at://" (:handle legacy))]
-                 :services {:atproto_pds {:type "AtprotoPersonalDataServer"
-                                          :endpoint (:service legacy)}}
-                 :prev nil
-                 :sig (:sig legacy)}
-                (plc/normalize-op legacy))))
-       (testing "unsigned legacy create does not grow a nil :sig"
-         (is (not (contains? (plc/normalize-op (dissoc legacy :sig)) :sig))))
-       (testing "plc_operation and tombstones pass through"
-         (is (= sample-operation (plc/normalize-op sample-operation)))
-         (is (= sample-tombstone (plc/normalize-op sample-tombstone)))))))
+       (is (= {:type "plc_operation"
+               :verificationMethods {:atproto (:signingKey legacy)}
+               :rotationKeys [(:recoveryKey legacy) (:signingKey legacy)]
+               :alsoKnownAs [(str "at://" (:handle legacy))]
+               :services {:atproto_pds {:type "AtprotoPersonalDataServer"
+                                        :endpoint (:service legacy)}}
+               :prev nil
+               :sig (:sig legacy)}
+              (plc/normalize-op legacy))))))
 
 ;; -----------------------------------------------------------------------------
-;; Signing payload, CIDs, DID derivation (golden fixtures)
+;; Signing payload, CIDs, DID derivation
 ;; -----------------------------------------------------------------------------
 
 #?(:clj
-   (deftest signing-payload-test
-     (is (= (dissoc sample-operation :sig)
-            (cbor/decode (plc/signing-payload sample-operation)))
-         "the payload is the DAG-CBOR of the operation without :sig")))
+   (defspec signing-payload-spec 100
+     ;; the signing payload is exactly the DAG-CBOR of the op without :sig
+     (prop/for-all [op gen-operation]
+       (= (dissoc op :sig)
+          (cbor/decode (plc/signing-payload op))))))
+
+#?(:clj
+   (defspec did-and-cid-derivation-spec 100
+     (prop/for-all [op gen-operation]
+       (let [did (plc/did-for-create-op op)
+             cid (plc/cid-for-op op)]
+         (and (re-matches #"did:plc:[a-z2-7]{24}" did)
+              (some? (data/parse-cid cid))
+              ;; deterministic
+              (= did (plc/did-for-create-op op))
+              (= cid (plc/cid-for-op op))
+              ;; sensitive to every byte, including the signature
+              (not= did (plc/did-for-create-op (update op :sig str "x")))
+              (not= cid (plc/cid-for-op (update op :sig str "x"))))))))
 
 #?(:clj
    (deftest golden-audit-log-test
@@ -110,8 +198,7 @@
          (let [entries (fixture audit-file)
                genesis (:operation (first entries))]
            (testing "did derivation"
-             (is (= did (plc/did-for-create-op genesis)))
-             (is (re-matches #"did:plc:[a-z2-7]{24}" (plc/did-for-create-op genesis))))
+             (is (= did (plc/did-for-create-op genesis))))
            (testing "every recorded cid is recomputed exactly"
              (doseq [{:keys [cid operation]} entries]
                (is (= cid (plc/cid-for-op operation)))))
@@ -154,103 +241,179 @@
 ;; Operation building & verification with real keypairs
 ;; -----------------------------------------------------------------------------
 
-#?(:clj (def recovery-kp (delay @(crypto/generate "ES256K"))))
-#?(:clj (def regular-kp (delay @(crypto/generate "ES256"))))
-#?(:clj (def attacker-kp (delay @(crypto/generate "ES256K"))))
-#?(:clj (def signing-kp (delay @(crypto/generate "ES256K"))))
+#?(:clj (def recovery-kp (delay (deref (crypto/generate "ES256K") 10000 ::timeout))))
+#?(:clj (def regular-kp (delay (deref (crypto/generate "ES256") 10000 ::timeout))))
+#?(:clj (def attacker-kp (delay (deref (crypto/generate "ES256K") 10000 ::timeout))))
 
 #?(:clj
-   (defn- genesis!
-     "A signed genesis {:did .. :op ..} with rotation keys
-     [recovery regular], signed by the regular key."
-     []
-     (deref (plc/create-op {:signing-key (crypto/did @signing-kp)
-                            :rotation-keys [(crypto/did @recovery-kp)
-                                            (crypto/did @regular-kp)]
-                            :handle "alice.test"
-                            :pds "https://pds.test"
-                            :signer @regular-kp})
-            10000 ::timeout)))
+   (def keypair-pool
+     "Three distinct keypairs reused across generative trials (key
+     generation, not signing, is the expensive part)."
+     (delay [@recovery-kp @regular-kp @attacker-kp])))
+
+#?(:clj (defn- pool-dids [] (mapv crypto/did @keypair-pool)))
+#?(:clj (defn- kp-for [did] (first (filter #(= did (crypto/did %)) @keypair-pool))))
 
 #?(:clj
-   (deftest create-op-test
-     (let [{:keys [did op] :as res} (genesis!)]
-       (is (nil? (:error res)))
-       (is (re-matches #"did:plc:[a-z2-7]{24}" did))
-       (is (s/valid? ::plc/operation op))
-       (is (= ["at://alice.test"] (:alsoKnownAs op)))
-       (is (nil? (:prev op)))
-       (is (not (str/ends-with? (:sig op) "=")) "signature is unpadded base64url")
-       (testing "verify-create-op accepts it and returns the document data"
-         (is (= {:did did
-                 :verificationMethods {:atproto (crypto/did @signing-kp)}
-                 :rotationKeys [(crypto/did @recovery-kp) (crypto/did @regular-kp)]
-                 :alsoKnownAs ["at://alice.test"]
-                 :services {:atproto_pds {:type "AtprotoPersonalDataServer"
-                                          :endpoint "https://pds.test"}}}
-                (deref (plc/verify-create-op did op) 10000 ::timeout))))
-       (testing "verify-op-sig identifies the signer"
-         (is (= {:did-key (crypto/did @regular-kp)}
-                (deref (plc/verify-op-sig (:rotationKeys op) op) 10000 ::timeout))))
-       (testing "a non-rotation key is not accepted"
-         (is (= "InvalidSignature"
-                (:error (deref (plc/verify-op-sig [(crypto/did @attacker-kp)] op)
-                               10000 ::timeout)))))
-       (testing "padded signatures are rejected"
-         (is (= "InvalidSignature"
-                (:error (deref (plc/verify-op-sig (:rotationKeys op)
-                                                  (update op :sig str "="))
-                               10000 ::timeout))))))))
+   (defspec sign-op-round-trip-spec 15
+     (prop/for-all [op gen-unsigned-operation
+                    signer-idx (gen/choose 0 2)]
+       (let [rotation (pool-dids)
+             signer (nth @keypair-pool signer-idx)
+             op (assoc op :rotationKeys rotation)
+             signed (deref (plc/sign-op op signer) 10000 ::timeout)
+             others (vec (remove #{(crypto/did signer)} rotation))]
+         (and (nil? (:error signed))
+              (= op (dissoc signed :sig))
+              ;; unpadded base64url signature
+              (some? (re-matches #"[A-Za-z0-9_-]+" (:sig signed)))
+              ;; verify identifies the signer among the rotation keys
+              (= {:did-key (crypto/did signer)}
+                 (deref (plc/verify-op-sig rotation signed) 10000 ::timeout))
+              ;; the other keys alone do not verify
+              (= "InvalidSignature"
+                 (:error (deref (plc/verify-op-sig others signed) 10000 ::timeout)))
+              ;; padded signatures are rejected outright
+              (= "InvalidSignature"
+                 (:error (deref (plc/verify-op-sig rotation (update signed :sig str "="))
+                                10000 ::timeout)))
+              ;; any mutation of the signed content invalidates the signature
+              (= "InvalidSignature"
+                 (:error (deref (plc/verify-op-sig
+                                 rotation (assoc signed :prev (plc/cid-for-op signed)))
+                                10000 ::timeout))))))))
 
 #?(:clj
-   (deftest update-chain-test
-     (let [{:keys [did op]} (genesis!)
-           new-signer (crypto/did @attacker-kp)
+   (defspec create-op-spec 10
+     (prop/for-all [handle tsg/hostname
+                    pds tsg/hostname
+                    signer-idx (gen/choose 0 2)]
+       (let [rotation (pool-dids)
+             signing-key (first rotation)
+             {:keys [error did op]} (deref (plc/create-op {:signing-key signing-key
+                                                           :rotation-keys rotation
+                                                           :handle handle
+                                                           :pds pds
+                                                           :signer (nth @keypair-pool signer-idx)})
+                                           10000 ::timeout)]
+         (and (nil? error)
+              (re-matches #"did:plc:[a-z2-7]{24}" did)
+              (s/valid? ::plc/operation op)
+              (nil? (:prev op))
+              ;; genesis validation recomputes the same DID and state
+              (= {:did did
+                  :verificationMethods {:atproto signing-key}
+                  :rotationKeys rotation
+                  :alsoKnownAs [(str "at://" handle)]
+                  :services {:atproto_pds {:type "AtprotoPersonalDataServer"
+                                           :endpoint (str "https://" pds)}}}
+                 (deref (plc/verify-create-op did op) 10000 ::timeout)))))))
+
+;; --- model-based update chains ----------------------------------------------
+
+#?(:clj
+   (def model-genesis
+     "Genesis op (signed once) whose rotation keys are the whole pool."
+     (delay
+       (deref (plc/create-op {:signing-key (first (pool-dids))
+                              :rotation-keys (pool-dids)
+                              :handle "alice.test"
+                              :pds "pds.test"
+                              :signer (first @keypair-pool)})
+              10000 ::timeout))))
+
+#?(:clj
+   (def gen-update-step
+     (gen/one-of
+      [(gen/tuple (gen/return :handle) tsg/hostname)
+       (gen/tuple (gen/return :pds) tsg/hostname)
+       (gen/tuple (gen/return :signing-key) (gen/choose 0 2))
+       (gen/tuple (gen/return :rotation-keys)
+                  (gen/fmap #(vec (distinct %)) (gen/vector (gen/choose 0 2) 1 3)))])))
+
+#?(:clj
+   (defn- apply-update-step
+     "Build the next op with the corresponding convenience builder (signed
+     by the current first rotation key) and update the model state."
+     [{:keys [ops data]} [kind arg]]
+     (let [signer (kp-for (first (:rotationKeys data)))
+           last-op (peek ops)
+           dids (pool-dids)
+           op (deref (case kind
+                       :handle (plc/update-handle-op last-op signer arg)
+                       :pds (plc/update-pds-op last-op signer arg)
+                       :signing-key (plc/update-signing-key-op last-op signer (dids arg))
+                       :rotation-keys (plc/update-rotation-keys-op
+                                       last-op signer (mapv dids arg)))
+                     10000 ::timeout)
+           data' (case kind
+                   :handle (assoc-in data [:alsoKnownAs 0] (str "at://" arg))
+                   :pds (assoc-in data [:services :atproto_pds]
+                                  {:type "AtprotoPersonalDataServer"
+                                   :endpoint (str "https://" arg)})
+                   :signing-key (assoc-in data [:verificationMethods :atproto] (dids arg))
+                   :rotation-keys (assoc data :rotationKeys (mapv dids arg)))]
+       {:ops (conj ops op) :data data'})))
+
+#?(:clj
+   (defspec update-chain-model-spec 10
+     ;; verify-operation-log over a randomly built chain of convenience-
+     ;; builder updates computes exactly the state of a pure model fold
+     (prop/for-all [steps (gen/vector gen-update-step 0 4)
+                    tombstone? gen/boolean]
+       (let [{:keys [did op]} @model-genesis
+             init {:ops [op]
+                   :data {:did did
+                          :verificationMethods {:atproto (first (pool-dids))}
+                          :rotationKeys (pool-dids)
+                          :alsoKnownAs ["at://alice.test"]
+                          :services {:atproto_pds {:type "AtprotoPersonalDataServer"
+                                                   :endpoint "https://pds.test"}}}}
+             {:keys [ops data]} (reduce apply-update-step init steps)
+             ops (if tombstone?
+                   (conj ops (deref (plc/tombstone-op (peek ops)
+                                                      (kp-for (first (:rotationKeys data))))
+                                    10000 ::timeout))
+                   ops)
+             result (deref (plc/verify-operation-log did ops) 30000 ::timeout)]
+         (= (if tombstone? {:tombstoned true} data)
+            result)))))
+
+#?(:clj
+   (deftest update-chain-adversarial-test
+     (let [{:keys [did op]} @model-genesis
            op2 (deref (plc/update-handle-op op @regular-kp "bob.test") 10000 ::timeout)
-           op3 (deref (plc/update-pds-op op2 @regular-kp "pds2.test") 10000 ::timeout)
-           op4 (deref (plc/update-signing-key-op op3 @regular-kp new-signer) 10000 ::timeout)
-           op5 (deref (plc/update-rotation-keys-op op4 @regular-kp [(crypto/did @recovery-kp)])
-                      10000 ::timeout)]
-       (doseq [op [op2 op3 op4 op5]]
-         (is (nil? (:error op))))
-       (is (= (plc/cid-for-op op) (:prev op2)))
-       (testing "the full chain verifies to the updated state"
-         (is (= {:did did
-                 :verificationMethods {:atproto new-signer}
-                 :rotationKeys [(crypto/did @recovery-kp)]
-                 :alsoKnownAs ["at://bob.test"]
-                 :services {:atproto_pds {:type "AtprotoPersonalDataServer"
-                                          :endpoint "https://pds2.test"}}}
-                (deref (plc/verify-operation-log did [op op2 op3 op4 op5]) 10000 ::timeout))))
-       (testing "rotation-key updates take effect: the old key may no longer sign"
-         (let [op6 (deref (plc/update-handle-op op5 @regular-kp "eve.test") 10000 ::timeout)]
+           rotated (deref (plc/update-rotation-keys-op op2 @regular-kp
+                                                       [(crypto/did @recovery-kp)])
+                          10000 ::timeout)
+           ts (deref (plc/tombstone-op op2 @recovery-kp) 10000 ::timeout)]
+       (is (every? #(nil? (:error %)) [op2 rotated ts]))
+       (testing "rotation-key updates take effect: a removed key may no longer sign"
+         (let [stale (deref (plc/update-handle-op rotated @regular-kp "eve.test")
+                            10000 ::timeout)]
            (is (= "InvalidSignature"
-                  (:error (deref (plc/verify-operation-log did [op op2 op3 op4 op5 op6])
+                  (:error (deref (plc/verify-operation-log did [op op2 rotated stale])
                                  10000 ::timeout))))))
-       (testing "tombstone terminates the chain"
-         (let [ts (deref (plc/tombstone-op op5 @recovery-kp) 10000 ::timeout)]
-           (is (s/valid? ::plc/tombstone ts))
-           (is (= {:tombstoned true}
-                  (deref (plc/verify-operation-log did [op op2 op3 op4 op5 ts])
-                         10000 ::timeout)))
-           (testing "tombstone must be the final operation"
-             (is (= "MisorderedOperation"
-                    (:error (deref (plc/verify-operation-log did [op op2 ts op3])
-                                   10000 ::timeout)))))
-           (testing "no operation may follow a tombstone"
-             (is (= "DidTombstoned" (:error (deref (plc/update-handle-op ts @recovery-kp "x.test")
-                                                   10000 ::timeout))))
-             (is (= "DidTombstoned" (:error (deref (plc/tombstone-op ts @recovery-kp)
-                                                   10000 ::timeout)))))))
+       (testing "tombstone must be the final operation"
+         (is (= "MisorderedOperation"
+                (:error (deref (plc/verify-operation-log did [op op2 ts rotated])
+                               10000 ::timeout)))))
+       (testing "no operation may follow a tombstone"
+         (is (= "DidTombstoned"
+                (:error (deref (plc/update-handle-op ts @recovery-kp "x.test") 10000 ::timeout))))
+         (is (= "DidTombstoned"
+                (:error (deref (plc/tombstone-op ts @recovery-kp) 10000 ::timeout)))))
        (testing "broken prev chain"
          (is (= "MisorderedOperation"
                 (:error (deref (plc/verify-operation-log
-                                did [op op2 (assoc op3 :prev (plc/cid-for-op op))])
+                                did [op op2 (assoc rotated :prev (plc/cid-for-op op))])
                                10000 ::timeout)))))
        (testing "op signed by a non-rotation key"
-         (let [bad (deref (plc/update-handle-op op2 @attacker-kp "mallory.test") 10000 ::timeout)]
+         (let [outsider (deref (crypto/generate "ES256K") 10000 ::timeout)
+               bad (deref (plc/update-handle-op op2 outsider "mallory.test") 10000 ::timeout)]
            (is (= "InvalidSignature"
-                  (:error (deref (plc/verify-operation-log did [op op2 bad]) 10000 ::timeout)))))))))
+                  (:error (deref (plc/verify-operation-log did [op op2 bad])
+                                 10000 ::timeout)))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Recovery window (nullified forks in audit logs)
@@ -264,51 +427,78 @@
       :nullified false
       :createdAt created-at}))
 
+#?(:clj (defn- iso [ms] (str (java.time.Instant/ofEpochMilli ms))))
+
 #?(:clj
-   (deftest recovery-window-test
-     (let [{:keys [did op]} (genesis!)
-           ;; signed by the lower-authority (regular) key
-           disputed (deref (plc/update-handle-op op @regular-kp "hijacked.test") 10000 ::timeout)
-           ;; the higher-authority (recovery) key forks history from genesis
-           recovered (deref (plc/update-handle-op op @recovery-kp "recovered.test") 10000 ::timeout)
-           genesis-entry (entry op "2023-01-01T00:00:00.000Z")
-           disputed-entry (entry disputed "2023-01-02T00:00:00.000Z")]
-       (testing "recovery within the 72h window nullifies the disputed op"
-         (is (= ["at://recovered.test"]
-                (:alsoKnownAs (deref (plc/verify-operation-log
-                                      did [genesis-entry
-                                           disputed-entry
-                                           (entry recovered "2023-01-03T00:00:00.000Z")])
-                                     10000 ::timeout)))))
-       (testing "recovery after 72h is rejected"
-         (is (= "LateRecovery"
-                (:error (deref (plc/verify-operation-log
-                                did [genesis-entry
-                                     disputed-entry
-                                     (entry recovered "2023-01-05T00:00:00.001Z")])
-                               10000 ::timeout)))))
-       (testing "timestamps must increase monotonically"
-         (is (= "MisorderedOperation"
-                (:error (deref (plc/verify-operation-log
-                                did [genesis-entry
-                                     disputed-entry
-                                     (entry recovered "2023-01-02T00:00:00.000Z")])
-                               10000 ::timeout)))))
-       (testing "a lower-authority key cannot nullify a higher-authority op"
-         (let [from-recovery (deref (plc/update-handle-op op @recovery-kp "held.test")
-                                    10000 ::timeout)
-               attack (deref (plc/update-handle-op op @regular-kp "stolen.test")
-                             10000 ::timeout)]
-           (is (= "InvalidSignature"
-                  (:error (deref (plc/verify-operation-log
-                                  did [genesis-entry
-                                       (entry from-recovery "2023-01-02T00:00:00.000Z")
-                                       (entry attack "2023-01-02T01:00:00.000Z")])
-                                 10000 ::timeout)))))))))
+   (def recovery-fixture
+     "Genesis with rotation keys [recovery regular], an op signed by the
+     lower-authority (regular) key, and a competing fork from genesis
+     signed by the higher-authority (recovery) key. Signed once; the
+     properties only vary the timestamps."
+     (delay
+       (let [{:keys [did op]} (deref (plc/create-op
+                                      {:signing-key (crypto/did @regular-kp)
+                                       :rotation-keys [(crypto/did @recovery-kp)
+                                                       (crypto/did @regular-kp)]
+                                       :handle "alice.test"
+                                       :pds "pds.test"
+                                       :signer @regular-kp})
+                                     10000 ::timeout)]
+         {:did did
+          :genesis op
+          :disputed (deref (plc/update-handle-op op @regular-kp "hijacked.test")
+                           10000 ::timeout)
+          :recovered (deref (plc/update-handle-op op @recovery-kp "recovered.test")
+                            10000 ::timeout)}))))
+
+#?(:clj (def t0 1672531200000)) ;; 2023-01-01T00:00:00Z
+
+#?(:clj
+   (defspec recovery-window-boundary-spec 30
+     ;; a nullifying fork is accepted iff its timestamp strictly increases
+     ;; and it lands within 72h of the first nullified op
+     (prop/for-all [offset-min (gen/choose (* -2 60) (* 5 24 60))]
+       (let [{:keys [did genesis disputed recovered]} @recovery-fixture
+             disputed-at (+ t0 (* 24 60 60000))
+             res (deref (plc/verify-operation-log
+                         did
+                         [(entry genesis (iso t0))
+                          (entry disputed (iso disputed-at))
+                          (entry recovered (iso (+ disputed-at (* offset-min 60000))))])
+                        30000 ::timeout)]
+         (cond
+           (<= offset-min 0) (= "MisorderedOperation" (:error res))
+           (<= offset-min (* 72 60)) (= ["at://recovered.test"] (:alsoKnownAs res))
+           :else (= "LateRecovery" (:error res)))))))
+
+#?(:clj
+   (deftest lower-authority-cannot-nullify-test
+     (let [{:keys [did genesis]} @recovery-fixture
+           from-recovery (deref (plc/update-handle-op genesis @recovery-kp "held.test")
+                                10000 ::timeout)
+           attack (deref (plc/update-handle-op genesis @regular-kp "stolen.test")
+                         10000 ::timeout)]
+       (is (= "InvalidSignature"
+              (:error (deref (plc/verify-operation-log
+                              did
+                              [(entry genesis (iso t0))
+                               (entry from-recovery (iso (+ t0 3600000)))
+                               (entry attack (iso (+ t0 7200000)))])
+                             10000 ::timeout)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Directory client (stubbed HTTP)
 ;; -----------------------------------------------------------------------------
+
+(def sample-operation
+  {:type "plc_operation"
+   :rotationKeys ["did:key:zQ3shhCGUqDKjStzuDxPkTxN6ujddP4RkEKJJouJGRRkaLGbg"]
+   :verificationMethods {:atproto "did:key:zQ3shunBKsXixLxKtC5qeSG9E4J5RkGN57im31pcTzbNQnm5w"}
+   :alsoKnownAs ["at://alice.test"]
+   :services {:atproto_pds {:type "AtprotoPersonalDataServer"
+                            :endpoint "https://pds.test"}}
+   :prev nil
+   :sig "dGVzdA"})
 
 #?(:clj
    (deftest directory-get-test
