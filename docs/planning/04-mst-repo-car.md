@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented (M1–M7 in one pass; WS-02/WS-03 had already landed, so no stubs were needed. CLJS test runs await WS-10's CI — the `.cljc` surface avoids JVM-only deps except where noted. Reference fixtures vendored from `bluesky-social/atproto` commit `3e977fe`.) |
 | **Priority** | P1 |
 | **Estimated size** | XL |
 | **Branch** | ws/04-mst-repo-car |
