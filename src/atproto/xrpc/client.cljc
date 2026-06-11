@@ -307,12 +307,16 @@
                           (let [request-headers (merged-headers client
                                                                 headers
                                                                 (when body
-                                                                  {:content-type encoding}))]
+                                                                  {:content-type encoding}))
+                                timeout (or (:timeout request) (:timeout client))
+                                signal (:signal request)]
                             (cond-> {:method :post
                                      :url (url client nsid)}
                               (seq request-headers) (assoc :headers request-headers)
                               params (assoc :query-params (xrpc-params->query-params params))
-                              body (assoc :body body)))))))
+                              body (assoc :body body)
+                              timeout (assoc :timeout timeout)
+                              signal (assoc :signal signal)))))))
    ::i/leave (fn [ctx]
                (update ctx ::i/response handle-xrpc-response))})
 
@@ -322,26 +326,80 @@
    ::i/enter (fn [ctx]
                (update ctx
                        ::i/request
-                       (fn [{:keys [nsid params headers]}]
-                         (let [request-headers (merged-headers client headers nil)]
+                       (fn [{:keys [nsid params headers timeout signal]}]
+                         (let [request-headers (merged-headers client headers nil)
+                               timeout (or timeout (:timeout client))]
                            (cond-> {:method :get
                                     :url (url client nsid)}
                              (seq request-headers) (assoc :headers request-headers)
-                             params (assoc :query-params (xrpc-params->query-params params)))))))
+                             params (assoc :query-params (xrpc-params->query-params params))
+                             timeout (assoc :timeout timeout)
+                             signal (assoc :signal signal))))))
    ::i/leave (fn [ctx]
                (update ctx ::i/response handle-xrpc-response))})
 
+(defn abort-signal
+  "Create a cancellation signal accepted by query/procedure as :signal.
+  Trip it with `abort!`."
+  []
+  (retry/abort-signal))
+
+(defn abort!
+  "Trip the signal. Pending xrpc calls deliver {:error \"Aborted\"} exactly
+  once and, where the platform supports it (CLJS XhrIo), the in-flight HTTP
+  request is aborted. On CLJ the underlying http-kit request cannot be
+  interrupted; its eventual result is discarded."
+  [signal]
+  (retry/abort! signal))
+
+(def ^:private aborted-response
+  {:error "Aborted" :message "Request aborted."})
+
+(defn- signal-interceptor
+  "Replace the response with {:error \"Aborted\"} when the signal has been
+  tripped, checked at chain entry (before the request is sent) and exit."
+  [signal]
+  (let [check (fn [ctx]
+                (if (retry/aborted? signal)
+                  (assoc ctx ::i/response aborted-response)
+                  ctx))]
+    {::i/name ::signal
+     ::i/enter check
+     ::i/leave check}))
+
 (defn- execute-xrpc
-  "Execute the XRPC interceptor chain for the request."
-  [client xrpc-interceptor request opts]
-  (i/execute {::i/request request
-              ::i/queue [(request-validator client)
-                         xrpc-interceptor
-                         (delegate-auth-interceptor client)
-                         atproto-json/client-interceptor
-                         json/client-interceptor
-                         http/client-interceptor]}
-             opts))
+  "Execute the XRPC interceptor chain for the request.
+
+  When the request carries :max-retries (or the client has a default),
+  retryable errors are retried with exponential backoff; the whole chain is
+  re-executed so auth refresh works per attempt. When the request carries a
+  :signal, abort! delivers {:error \"Aborted\"} exactly once (in-flight
+  results are discarded)."
+  [client xrpc-interceptor {:keys [signal] :as request} opts]
+  (let [max-retries (or (:max-retries request) (:max-retries client) 0)
+        ctx {::i/request request
+             ::i/queue (cond->> [(request-validator client)
+                                 xrpc-interceptor
+                                 (delegate-auth-interceptor client)
+                                 atproto-json/client-interceptor
+                                 json/client-interceptor
+                                 http/client-interceptor]
+                         signal (cons (signal-interceptor signal)))}]
+    (if (or (pos? max-retries) signal)
+      (let [[cb val] (i/platform-async opts)
+            delivered? (atom false)
+            deliver! (fn [result]
+                       (when (compare-and-set! delivered? false true)
+                         (cb result)))]
+        (when signal
+          (retry/on-abort! signal #(deliver! aborted-response)))
+        (retry/with-retry (fn [attempt-cb]
+                            (i/execute ctx :callback attempt-cb))
+                          {:max-retries max-retries
+                           :signal signal}
+                          deliver!)
+        val)
+      (i/execute ctx opts))))
 
 (defn procedure
   [client request & {:as opts}]

@@ -8,9 +8,11 @@
             [atproto.runtime.http.response :as-alias response]
             [atproto.runtime.http.url :as-alias url]
             [atproto.runtime.cast :as cast]
+            [atproto.runtime.retry :as retry]
             #?@(:clj [[org.httpkit.client :as http]]))
-  #?(:clj (:import [java.net URI URL MalformedURLException URLEncoder URLDecoder])
-     :cljs (:import [goog.net EventType XhrIo]
+  #?(:clj (:import [java.net URI URL MalformedURLException URLEncoder URLDecoder]
+                   [org.httpkit.client TimeoutException])
+     :cljs (:import [goog.net ErrorCode EventType XhrIo]
                     [goog Uri])))
 
 #?(:clj (set! *warn-on-reflection* true))
@@ -122,29 +124,43 @@
        (when fragment (str "#" fragment))))
 
 (defn handle-request
-  "runtime-specific handling of the http request"
+  "runtime-specific handling of the http request
+
+  Honors :timeout (ms), surfacing {:error \"Timeout\"}. On CLJS an aborted
+  request (via the :signal abort signal, see atproto.runtime.retry)
+  surfaces {:error \"Aborted\"}; on CLJ in-flight requests cannot be
+  interrupted and cancellation is cooperative (handled by the callers)."
   [http-request cb]
   #?(:clj
-     (http/request (update http-request :headers stringify-keys)
+     (http/request (-> http-request
+                       (dissoc :signal)
+                       (update :headers stringify-keys))
                    (fn [{:keys [^Throwable error] :as http-response}]
                      (let [http-response (dissoc http-response :opts)]
-                       (cb (if error
+                       (cb (cond
+                             (instance? TimeoutException error)
+                             {:error "Timeout"
+                              :message (.getMessage error)
+                              :ex error}
+
+                             error
                              {:error "HTTPClientError"
                               :message (.getMessage error)
                               :ex error}
-                             http-response)))))
+
+                             :else http-response)))))
 
      :cljs
-     (let [{:keys [method url query-params headers body]} http-request]
+     (let [{:keys [method url query-params headers body timeout signal]} http-request]
        (let [uri (doto (Uri. url)
                    (.setQuery (query-params->query-string query-params)))
              xhr (doto (XhrIo.)
-                   (.setTimeoutInterval 0))]
+                   (.setTimeoutInterval (or timeout 0)))]
          (.listen xhr
                   EventType/COMPLETE
                   (fn [evt]
                     (let [target (.-target evt)
-                          error (not-empty (.getLastError target))
+                          error-code (.getLastErrorCode target)
                           http-response {:status (.getStatus target)
                                          :headers (->> (.getAllResponseHeaders target)
                                                        (str/split-lines)
@@ -159,7 +175,19 @@
                                                                      headers)))
                                                                {}))
                                          :body (.getResponse target)}]
-                      (cb http-response))))
+                      (cond
+                        (= ErrorCode/TIMEOUT error-code)
+                        (cb {:error "Timeout"
+                             :message "The HTTP request timed out."})
+
+                        (= ErrorCode/ABORT error-code)
+                        (cb {:error "Aborted"
+                             :message "The HTTP request was aborted."})
+
+                        :else
+                        (cb http-response)))))
+         (when signal
+           (retry/on-abort! signal #(.abort xhr)))
          (.send xhr
                 uri
                 (name method)

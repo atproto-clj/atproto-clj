@@ -316,6 +316,117 @@
                 (:atproto-accept-labelers (:headers (second @requests)))))))))
 
 #?(:clj
+   (deftest timeout-threading-test
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       (repeat 2 (fake-http/json-response {:ok true})))
+           xrpc (client/init {:service "https://pds.test" :timeout 5000})]
+       (with-redefs [http/handle-request handler]
+         ;; the client default reaches the http request
+         (deref (client/query xrpc {:nsid "com.example.query"}) 1000 ::timeout)
+         (is (= 5000 (:timeout (first @requests))))
+         ;; a per-request timeout overrides it
+         (deref (client/query xrpc {:nsid "com.example.query" :timeout 100})
+                1000 ::timeout)
+         (is (= 100 (:timeout (second @requests))))))))
+
+#?(:clj
+   (deftest retry-test
+     ;; retryable error then success
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(fake-http/json-response 503 {:error "NotEnoughResources"})
+                                        (fake-http/json-response {:ok true})])
+           xrpc (client/init {:service "https://pds.test" :max-retries 2})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/query xrpc {:nsid "com.example.query"})
+                           5000 ::timeout)]
+           (is (= {:ok true} resp))
+           (is (= 2 (count @requests))))))
+     ;; default is a single attempt
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(fake-http/json-response 503 {:error "NotEnoughResources"})
+                                        (fake-http/json-response {:ok true})])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/query xrpc {:nsid "com.example.query"})
+                           1000 ::timeout)]
+           (is (= "NotEnoughResources" (:error resp)))
+           (is (= 1 (count @requests))))))
+     ;; non-retryable errors are not retried
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       (repeat 3 (fake-http/json-response 400 {:error "InvalidRequest"})))
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/query xrpc {:nsid "com.example.query" :max-retries 3})
+                           5000 ::timeout)]
+           (is (= "InvalidRequest" (:error resp)))
+           (is (= 1 (count @requests))))))
+     ;; retries are capped by :max-retries
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       (repeat 5 (fake-http/json-response 503 {:error "NotEnoughResources"})))
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/query xrpc {:nsid "com.example.query" :max-retries 2})
+                           10000 ::timeout)]
+           (is (= "NotEnoughResources" (:error resp)))
+           (is (= 3 (count @requests))))))))
+
+#?(:clj
+   (deftest abort-test
+     ;; a signal aborted before the call delivers Aborted without hitting the wire
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(fake-http/json-response {:ok true})])
+           xrpc (client/init {:service "https://pds.test"})
+           signal (client/abort-signal)]
+       (client/abort! signal)
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/query xrpc {:nsid "com.example.query" :signal signal})
+                           1000 ::timeout)]
+           (is (= "Aborted" (:error resp)))
+           (is (empty? @requests)))))
+     ;; aborting while the request is in flight delivers Aborted exactly once
+     (let [in-flight (promise)
+           handler (fn [_ _] (deliver in-flight true) nil) ;; never responds
+           xrpc (client/init {:service "https://pds.test"})
+           signal (client/abort-signal)]
+       (with-redefs [http/handle-request handler]
+         (let [result (client/query xrpc {:nsid "com.example.query" :signal signal})]
+           (is (true? (deref in-flight 1000 ::timeout)))
+           (client/abort! signal)
+           (is (= "Aborted" (:error (deref result 1000 ::timeout)))))))
+     ;; the discarded late result does not overwrite the abort
+     (let [respond! (atom nil)
+           handler (fn [_ cb] (reset! respond! #(cb (fake-http/json-response {:ok true}))))
+           xrpc (client/init {:service "https://pds.test"})
+           signal (client/abort-signal)]
+       (with-redefs [http/handle-request handler]
+         (let [result (client/query xrpc {:nsid "com.example.query" :signal signal})]
+           (client/abort! signal)
+           (is (= "Aborted" (:error (deref result 1000 ::timeout))))
+           ;; the http response eventually arrives and is discarded
+           (@respond!)
+           (is (= "Aborted" (:error @result))))))))
+
+#?(:clj
+   (deftest abort-during-refresh-test
+     ;; an abort tripped while the auth refresh is in flight still delivers
+     ;; exactly one Aborted error
+     (let [signal (client/abort-signal)
+           session (stub-session "old"
+                                 (fn [_ cb]
+                                   (client/abort! signal)
+                                   (cb (stub-session "new" (fn [_ cb] (cb {:error "TokenRefreshError"}))))))
+           {:keys [handler]} (fake-http/routed
+                              [[#(= "Bearer old" (bearer %)) expired-response]
+                               [#(= "Bearer new" (bearer %)) (fake-http/json-response {:ok true})]])
+           xrpc (client/init {:session session})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/procedure xrpc {:nsid "com.example.proc"
+                                                   :body {:a 1}
+                                                   :signal signal})
+                           1000 ::timeout)]
+           (is (= "Aborted" (:error resp))))))))
+
+#?(:clj
    (deftest single-flight-refresh-test
      (let [refresh-calls (atom 0)
            release (promise)
