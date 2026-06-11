@@ -55,6 +55,20 @@
                              (str (str/lower-case authority) "." name))
                            ::s/invalid))))
 
+(defn parse-nsid
+  "Parse a valid NSID and return {:authority ... :name ...}.
+
+  The authority is in domain order, i.e. the NSID segments minus the name,
+  reversed (e.g. \"app.bsky.feed.post\" -> {:authority \"feed.bsky.app\"
+  :name \"post\"}). Return nil if the NSID is invalid."
+  [nsid]
+  (when (string? nsid)
+    (let [conformed (s/conform ::nsid nsid)]
+      (when-not (= ::s/invalid conformed)
+        (let [segments (str/split conformed #"\.")]
+          {:authority (str/join "." (reverse (butlast segments)))
+           :name (last segments)})))))
+
 ;; datetime supports nanosecond precision: "1985-04-12T23:20:50.123456789"
 ;; but not below: "1985-04-12T23:20:50.12345678912345"
 

@@ -24,6 +24,23 @@
                        (str/starts-with? % "#")))
           (into []))))
 
+(deftest parse-nsid-test
+  (testing "authority is returned in domain order"
+    (is (= {:authority "feed.bsky.app" :name "post"}
+           (lexicon/parse-nsid "app.bsky.feed.post")))
+    (is (= {:authority "example.com" :name "fooBar"}
+           (lexicon/parse-nsid "com.example.fooBar"))))
+  (testing "valid NSIDs parse"
+    (doseq [nsid (interop-test-cases "syntax/nsid_syntax_valid.txt")]
+      (let [{:keys [authority name]} (lexicon/parse-nsid nsid)]
+        (is (string? authority) (str nsid " has an authority"))
+        (is (string? name) (str nsid " has a name")))))
+  (testing "invalid NSIDs return nil"
+    (doseq [nsid (interop-test-cases "syntax/nsid_syntax_invalid.txt")]
+      (is (nil? (lexicon/parse-nsid nsid)) (str nsid " does not parse")))
+    (is (nil? (lexicon/parse-nsid nil)))
+    (is (nil? (lexicon/parse-nsid 42)))))
+
 (defn- blob-ref
   "Helper to create test blob refs."
   [mime-type size]

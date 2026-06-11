@@ -1,70 +1,249 @@
 (ns atproto.lexicon.resolver
-  (:require [atproto.runtime.interceptor :as i]
+  "Network resolution of Lexicon schemas from NSIDs.
+
+  Resolution flow: NSID -> authority DID (`_lexicon` DNS TXT record, or
+  `:did-authority` override) -> DID document -> PDS endpoint ->
+  `com.atproto.lexicon.schema` record at
+  `at://<did>/com.atproto.lexicon.schema/<nsid>` -> validated Lexicon
+  document.
+
+  Trust model: records are fetched with `com.atproto.repo.getRecord` and are
+  NOT cryptographically verified against a repo commit proof (the SDK has no
+  CAR/MST/commit-signature support yet). The resolved `:uri` and `:cid` are
+  returned so proof verification can be layered on later without an API
+  change.
+
+  See https://atproto.com/specs/lexicon#lexicon-publication-and-resolution"
+  (:require [clojure.string :as str]
+            [clojure.spec.alpha :as s]
+            [atproto.runtime.interceptor :as i]
             [atproto.runtime.dns :as dns]
-            [atproto.runtime.json :as json]
+            [atproto.runtime.cast :as cast]
+            [atproto.identity :as identity]
+            [atproto.lexicon :as lexicon]
+            [atproto.lexicon.schema :as-alias schema]
             [atproto.xrpc.client :as xrpc]))
 
 (def lexicon-record-collection "com.atproto.lexicon.schema")
 
-(defn- fetch-lexicon
-  [{:keys [did pds rkey]} cb]
-  (xrpc/query {:atproto.session/service pds}
-              {:op :com.atproto.repo.getRecord
-               :params {:repo did
-                        :collection lexicon-record-collection
-                        :rkey rkey}}
-              :callback
-              (fn [{:keys [error] :as resp}]
-                (tap> resp)
-                (if error (cb resp) (cb (:value resp))))))
+(defn- txt-record-value
+  "Normalize a DNS TXT record value.
 
-(defn- nsid->did
-  "Resolve this NSID to a DID using DNS."
-  [nsid cb]
-  (let [{:keys [domain-authority]} (nsid/parse nsid)
-        hostname (->> (str/split domain-authority #"\.")
-                      (reverse)
-                      (into ["_lexicon"])
-                      (str/join "."))]
-    (println hostname)
-    (if (< 253 (count hostname))
-      (cb {:error (str "Cannot resolve nsid, hostname too long: " hostname)})
-      (i/execute {::i/request {:hostname hostname
-                               :type "txt"}
-                  ::i/queue [dns/interceptor]}
-                 :callback
-                 (fn [{:keys [error values] :as resp}]
-                   (if error
-                     (cb resp)
-                     (let [dids (->> values
-                                     (map #(some->> %
-                                                    (re-matches #"^did=(.+)$")
-                                                    (second)))
-                                     (remove nil?)
-                                     (seq))]
-                       (cond
-                         (empty? dids)      (cb {:error "Cannot resolve NSID. DID not found."})
-                         :else              (cb {:did (first dids)})))))))))
+  Long TXT records are chunked into multiple character-strings which some
+  resolvers return as a single space-separated sequence of quoted strings;
+  concatenate the chunks (the reference implementation joins chunks the same
+  way)."
+  [v]
+  (if (re-matches #"\"[^\"]*\"(?:\s+\"[^\"]*\")*" v)
+    (->> (re-seq #"\"([^\"]*)\"" v)
+         (map second)
+         (apply str))
+    v))
+
+(defn resolve-nsid-authority
+  "Resolve the DID with authority over this NSID via the `_lexicon` DNS TXT record.
+
+  Looks up TXT records for `_lexicon.<domain-authority>` (e.g.
+  `_lexicon.feed.bsky.app` for `app.bsky.feed.post`). Exactly one `did=`
+  record must exist and contain a syntactically valid DID.
+
+  Async (callback/promise/channel per atproto.runtime.interceptor/platform-async).
+  Success: {:did \"did:plc:...\"}
+  Errors:  {:error \"LexiconAuthorityNotFound\" :message ... :nsid ...}
+           {:error \"InvalidNsid\" :message ...}"
+  [nsid & {:as opts}]
+  (let [[cb val] (i/platform-async (select-keys opts [:callback :promise :channel]))]
+    (if-let [{:keys [authority]} (lexicon/parse-nsid nsid)]
+      (let [hostname (str "_lexicon." authority)]
+        (if (< 253 (count hostname))
+          (cb {:error "InvalidNsid"
+               :message (str "Cannot resolve NSID, hostname too long: " hostname)
+               :nsid nsid})
+          (i/execute {::i/request {:hostname hostname
+                                   :type "txt"}
+                      ::i/queue [dns/interceptor]}
+                     :callback
+                     (fn [{:keys [error values] :as resp}]
+                       (if error
+                         (do
+                           (cast/dev {:message "Lexicon authority DNS lookup failed"
+                                      :hostname hostname
+                                      :response resp})
+                           (cb {:error "LexiconAuthorityNotFound"
+                                :message (str "No _lexicon DNS TXT record found for " hostname ".")
+                                :nsid nsid}))
+                         (let [dids (->> values
+                                         (map txt-record-value)
+                                         (keep #(second (re-matches #"^did=(.+)$" %))))]
+                           (cond
+                             (empty? dids)
+                             (cb {:error "LexiconAuthorityNotFound"
+                                  :message (str "No did= TXT record found at " hostname ".")
+                                  :nsid nsid})
+
+                             (< 1 (count dids))
+                             (cb {:error "LexiconAuthorityNotFound"
+                                  :message (str "Multiple did= TXT records found at " hostname
+                                                "; exactly one is required.")
+                                  :nsid nsid})
+
+                             (not (s/valid? ::lexicon/did (first dids)))
+                             (cb {:error "LexiconAuthorityNotFound"
+                                  :message (str "Invalid DID in the " hostname
+                                                " TXT record: " (first dids))
+                                  :nsid nsid})
+
+                             :else
+                             (cb {:did (first dids)}))))))))
+      (cb {:error "InvalidNsid"
+           :message (str "Invalid NSID: " nsid)}))
+    val))
+
+(defn- validate-lexicon-record
+  "Validate the fetched lexicon schema record.
+
+  Return the success map for `resolve-nsid`, or an error map."
+  [nsid did {:keys [uri cid value]}]
+  (cond
+    (and (:$type value)
+         (not= lexicon-record-collection (:$type value)))
+    {:error "InvalidLexiconDocument"
+     :message (str "Record is not a " lexicon-record-collection
+                   " record: " (:$type value))
+     :nsid nsid}
+
+    (not (s/valid? ::schema/file value))
+    {:error "InvalidLexiconDocument"
+     :message (str "The record at " uri " is not a valid Lexicon document.")
+     :nsid nsid
+     :explain-data (s/explain-data ::schema/file value)}
+
+    (not= nsid (:id value))
+    {:error "LexiconNsidMismatch"
+     :message (str "The Lexicon document id (" (:id value)
+                   ") does not match the resolved NSID (" nsid ").")
+     :nsid nsid
+     :id (:id value)}
+
+    :else
+    (cond-> {:nsid nsid
+             :did did
+             :uri (or uri (str "at://" did "/" lexicon-record-collection "/" nsid))
+             :lexicon value}
+      cid (assoc :cid cid))))
+
+(defn- fetch-lexicon
+  "Fetch the lexicon schema record from the authority DID's PDS and validate it."
+  [nsid did cb]
+  (identity/resolve-did
+   did
+   :callback
+   (fn [{:keys [error did-doc] :as resp}]
+     (if error
+       (cb {:error "LexiconResolutionError"
+            :message (str "Could not resolve the authority DID " did
+                          ": " (or (:message resp) error))
+            :nsid nsid
+            :did did})
+       (if-let [pds (identity/did-doc-pds did-doc)]
+         (xrpc/query (xrpc/init {:service pds})
+                     {:nsid "com.atproto.repo.getRecord"
+                      :params {:repo did
+                               :collection lexicon-record-collection
+                               :rkey nsid}}
+                     :callback
+                     (fn [{:keys [error] :as resp}]
+                       (if error
+                         (do
+                           (cast/dev {:message "Lexicon record fetch failed"
+                                      :nsid nsid
+                                      :did did
+                                      :response resp})
+                           (cb {:error "LexiconResolutionError"
+                                :message (str "Could not fetch the lexicon record for "
+                                              nsid " from " pds
+                                              ": " (or (:message resp) error))
+                                :nsid nsid
+                                :did did}))
+                         (cb (validate-lexicon-record nsid did resp)))))
+         (cb {:error "LexiconResolutionError"
+              :message (str "The DID document for " did " has no PDS endpoint.")
+              :nsid nsid
+              :did did}))))))
+
+(defn memory-cache
+  "A simple atom-backed cache for resolve-nsid. Optional :ttl-ms."
+  [& {:keys [ttl-ms]}]
+  {:ttl-ms ttl-ms
+   :data (atom {})})
+
+(defn- now-ms
+  []
+  #?(:clj (System/currentTimeMillis)
+     :cljs (.now js/Date)))
+
+(defn- cache-lookup
+  [{:keys [ttl-ms data]} nsid]
+  (when-let [{:keys [val at]} (get @data nsid)]
+    (when (or (nil? ttl-ms)
+              (< (- (now-ms) at) ttl-ms))
+      val)))
+
+(defn- cache-store!
+  [{:keys [data]} nsid val]
+  (swap! data assoc nsid {:val val :at (now-ms)}))
 
 (defn resolve-nsid
-  "Resolve the NSID into a Lexicon."
-  [nsid & {:as opts}]
-  (let [[cb val] (i/platform-async opts)]
-    (nsid->did nsid
-               (fn [{:keys [error did] :as resp}]
-                 (if error
-                   (cb resp)
-                   (did/resolve did
-                                :callback
-                                (fn [{:keys [error did doc] :as resp}]
-                                  (if error
-                                    (cb resp)
-                                    (if-let [pds (did/pds doc)]
-                                      (fetch-lexicon {:did did
-                                                      :pds pds
-                                                      :rkey nsid} cb)
-                                      (cb {:error "DID doc is missing the PDS url."
-                                           :nsid nsid
-                                           :did did
-                                           :doc doc}))))))))
+  "Resolve the NSID to its published Lexicon schema document.
+
+  Steps: authority DID (DNS, or :did-authority override) -> resolve DID doc
+  (atproto.identity/resolve-did) -> PDS endpoint (identity/did-doc-pds)
+  -> com.atproto.repo.getRecord {:repo did
+                                 :collection \"com.atproto.lexicon.schema\"
+                                 :rkey nsid}
+  -> validate (:value response) against :atproto.lexicon.schema/file,
+     check (= (:id doc) nsid).
+
+  Options:
+  :did-authority  Skip DNS and use this DID as the authority.
+  :cache          A cache from `memory-cache`; a hit short-circuits the network.
+  :force-refresh  Bypass and repopulate the cache.
+
+  Async (callback/promise/channel per atproto.runtime.interceptor/platform-async).
+  Success: {:nsid nsid
+            :did \"did:...\"        ; authority
+            :uri \"at://did:.../com.atproto.lexicon.schema/<nsid>\"
+            :cid \"bafy...\"        ; from the getRecord response, when present
+            :lexicon {...}}         ; the schema document (Clojure map)
+  Errors:  {:error \"InvalidNsid\" :message ...}
+           {:error \"LexiconAuthorityNotFound\" ...}
+           {:error \"LexiconResolutionError\" :message ... :nsid ...}   ; DID/PDS/fetch failures
+           {:error \"InvalidLexiconDocument\" :message ... :nsid ... :explain-data ...}
+           {:error \"LexiconNsidMismatch\" :message ... :nsid ... :id ...}"
+  [nsid & {:keys [did-authority cache force-refresh] :as opts}]
+  (let [[cb val] (i/platform-async (select-keys opts [:callback :promise :channel]))
+        cb (if cache
+             (fn [{:keys [error] :as resp}]
+               (when-not error
+                 (cache-store! cache nsid resp))
+               (cb resp))
+             cb)]
+    (cond
+      (not (lexicon/parse-nsid nsid))
+      (cb {:error "InvalidNsid"
+           :message (str "Invalid NSID: " nsid)})
+
+      :else
+      (if-let [cached (and cache
+                           (not force-refresh)
+                           (cache-lookup cache nsid))]
+        (cb cached)
+        (if did-authority
+          (fetch-lexicon nsid did-authority cb)
+          (resolve-nsid-authority nsid
+                                  :callback
+                                  (fn [{:keys [error did] :as resp}]
+                                    (if error
+                                      (cb resp)
+                                      (fetch-lexicon nsid did cb)))))))
     val))
