@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented (all 4 milestones; cljs CI verification deferred to WS-10) |
 | **Priority** | P0 |
 | **Estimated size** | L |
 | **Branch** | ws/02-dag-cbor-data-model |
@@ -330,17 +330,17 @@ All tests `.cljc` under `test/`, runnable with `clojure -X:test` on the JVM (clj
 
 ## Acceptance criteria
 
-- [ ] `clojure -X:test` is green on JVM with all new tests enabled.
-- [ ] All 3 vendored data-model fixtures pass: byte-exact `encode`, CID-exact `cid-for`, JSON round-trip.
-- [ ] All ported strictness vectors behave as specified (floats, duplicate keys, indefinite lengths, non-shortest forms, bad tag-42 lead-in, trailing bytes, `f7` coercion).
-- [ ] `(data/format-cid (data/blob-ref (bytes-of "...")))` matches an independently computed raw CID (the `mhash/create` bug is fixed and pinned by a known-answer test).
-- [ ] `data.json/encode` emits unpadded `$bytes`; `base64-encode`/`base64-decode` and `bytes/eq?` have working `:cljs` branches (code-reviewed; cljs CI execution is WS-10).
-- [ ] `decode-multi` decodes a buffer of ≥2 concatenated items (firehose-frame shape) and errors on truncation.
-- [ ] `atproto.runtime.varint` round-trips and matches `multiformats.varint` byte-for-byte.
-- [ ] `::data/legacy-blob`, `legacy-blob?`, `upgrade-legacy-blob` exist and are spec'd; codecs pass legacy blobs through unchanged.
-- [ ] The TODO at `src/atproto/data.cljc:144` is replaced with the documented decision.
-- [ ] No new dependency added to `deps.edn` (or, if the library route is taken after all, the decision is recorded in this doc's Risks section and the dep is JVM+cljs compatible).
-- [ ] Manual live check against a real PDS record documented and performed once (`getRecord` CID parity).
+- [x] `clojure -X:test` is green on JVM with all new tests enabled.
+- [x] All 3 vendored data-model fixtures pass: byte-exact `encode`, CID-exact `cid-for`, JSON round-trip.
+- [x] All ported strictness vectors behave as specified (floats, duplicate keys, indefinite lengths, non-shortest forms, bad tag-42 lead-in, trailing bytes, `f7` coercion).
+- [x] `(data/format-cid (data/blob-ref (bytes-of "...")))` matches an independently computed raw CID (the `mhash/create` bug is fixed and pinned by a known-answer test).
+- [x] `data.json/encode` emits unpadded `$bytes`; `base64-encode`/`base64-decode` and `bytes/eq?` have working `:cljs` branches (code-reviewed; cljs CI execution is WS-10).
+- [x] `decode-multi` decodes a buffer of ≥2 concatenated items (firehose-frame shape) and errors on truncation.
+- [x] `atproto.runtime.varint` round-trips and matches `multiformats.varint` byte-for-byte.
+- [x] `::data/legacy-blob`, `legacy-blob?`, `upgrade-legacy-blob` exist and are spec'd; codecs pass legacy blobs through unchanged.
+- [x] The TODO at `src/atproto/data.cljc:144` is replaced with the documented decision.
+- [x] No new dependency added to `deps.edn` (or, if the library route is taken after all, the decision is recorded in this doc's Risks section and the dep is JVM+cljs compatible).
+- [x] Manual live check against a real PDS record documented and performed once (`getRecord` CID parity).
 
 ## Milestones
 

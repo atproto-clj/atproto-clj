@@ -59,7 +59,11 @@
 ;; -----------------------------------------------------------------------------
 
 (defn encode
-  "Take valid atproto data and return the JSON value."
+  "Take valid atproto data and return the JSON value.
+
+  Bytes are emitted as {:$bytes <unpadded standard base64>}. Legacy
+  untyped blob refs are not special-cased: they pass through as plain
+  maps (TS parity); see atproto.data/legacy-blob?."
   [data]
   (cond
     (nil? data)        data
@@ -72,7 +76,10 @@
     (map? data)        (into {} (map (fn [[k v]] [k (encode v)]) data))))
 
 (defn decode
-  "Take a valid JSON value and return the atproto data."
+  "Take a valid JSON value and return the atproto data.
+
+  Legacy untyped blob refs are not special-cased: they pass through as
+  plain maps (TS parity); see atproto.data/legacy-blob?."
   [value]
   (cond
     (nil? value)        value

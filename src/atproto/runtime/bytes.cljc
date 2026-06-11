@@ -14,7 +14,13 @@
 
 (defn eq?
   [a b]
-  #?(:clj (Arrays/equals ^bytes a ^bytes b)))
+  #?(:clj (Arrays/equals ^bytes a ^bytes b)
+     :cljs (and (= (.-length a) (.-length b))
+                (loop [i 0]
+                  (cond
+                    (= i (.-length a)) true
+                    (= (aget a i) (aget b i)) (recur (inc i))
+                    :else false)))))
 
 (defn ->utf8
   [bytes]
