@@ -1,6 +1,7 @@
 (ns atproto.runtime.crypto
   "Cross-platform cryptographic functions for atproto."
-  (:require [clojure.string :as str])
+  (:require [clojure.string :as str]
+            #?@(:cljs [[goog.crypt.base64 :as b64]]))
   #?(:clj (:import [java.util Base64 HexFormat]
                    [com.nimbusds.jose.util Base64URL]
                    [java.security SecureRandom MessageDigest]
@@ -46,15 +47,27 @@
   (hex-encode (sha256 bytes-or-str)))
 
 (defn base64-encode
-  "Standard base64 (RFC 4648 §4) string of the byte array, without padding
-  (required by the atproto $bytes form). base64-decode accepts both padded
-  and unpadded input."
-  [^bytes b]
-  #?(:clj (.encodeToString (.withoutPadding (Base64/getEncoder)) b)))
+  "bytes -> standard-alphabet base64 string, no padding (atproto `$bytes` form)."
+  [b]
+  #?(:clj (.encodeToString (.withoutPadding (Base64/getEncoder)) ^bytes b)
+     :cljs (b64/encodeByteArray
+            (js/Uint8Array. (.-buffer b) (.-byteOffset b) (.-length b))
+            (.-NO_PADDING b64/Alphabet))))
 
 (defn base64-decode
+  "Standard-alphabet base64 string (padded or unpadded) -> bytes.
+
+  Returns nil if the input is not valid base64."
   [s]
-  #?(:clj (try (.decode (Base64/getDecoder) ^String s) (catch Exception _))))
+  (when (string? s)
+    (let [stripped (str/replace s #"=+$" "")]
+      (when (and (re-matches #"[A-Za-z0-9+/]*" stripped)
+                 (not= 1 (mod (count stripped) 4)))
+        #?(:clj (try
+                  (.decode (Base64/getDecoder) ^String stripped)
+                  (catch Exception _ nil))
+           :cljs (let [u8 (b64/decodeStringToUint8Array stripped)]
+                   (js/Int8Array. (.-buffer u8) (.-byteOffset u8) (.-length u8))))))))
 
 (defn base64url-encode
   "bytes -> url-safe base64 string."
