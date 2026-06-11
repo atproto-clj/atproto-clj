@@ -386,19 +386,25 @@
 
     }})
 
-(defn translate-and-register-specs!
+(defn register-test-specs!
   [schema]
   (let [schema-valid? (s/valid? :atproto.lexicon.schema/file schema)]
     (when (is schema-valid? "The test schema is valid.")
-      (eval `(do ~@(lexicon/translate schema))))))
+      (lexicon/register-specs! {(:id schema) schema})
+      true)))
 
-(deftest test-translator
-  (when (translate-and-register-specs! schema)
+(defn spec-for
+  "The registered validator for this spec key, or the key itself."
+  [spec-key]
+  (or (lexicon/registered-validator spec-key) spec-key))
+
+(deftest test-validator-compiler
+  (when (register-test-specs! schema)
     (doseq [[k def] (:defs schema)]
       (let [spec-key (keyword (:id schema) (name k))]
         (doseq [valid (::valid def)]
-          (is (s/valid? spec-key valid)
+          (is (s/valid? (spec-for spec-key) valid)
               (str "\"" valid "\" is a valid " spec-key)))
         (doseq [invalid (::invalid def)]
-          (is (not (s/valid? spec-key invalid))
+          (is (not (s/valid? (spec-for spec-key) invalid))
               (str "[" invalid "] is not a valid " spec-key)))))))

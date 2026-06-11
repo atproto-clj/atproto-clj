@@ -466,8 +466,11 @@
   "Translate the Lexicon Primary Type Definition into spec forms and add them to the context."
   (fn [ctx primary-type-def] (:type primary-type-def)))
 
-(defn translate
-  "Translate the Lexicon file into Clojure spec forms and return them as a seq."
+(defn ^:deprecated translate
+  "Translate the Lexicon file into Clojure spec forms and return them as a seq.
+
+  Deprecated: prefer `register-specs!`, which compiles schemas to validator
+  closures without eval (and therefore works on ClojureScript)."
   [{:keys [id] :as file}]
   (let [ctx (context id)]
     (doseq [[kwd [type def]] (:defs (s/conform ::schema/file file))]
@@ -659,6 +662,46 @@
     (spec-key (cond-> {:ns nsid}
                 type-name (nest type-name)))))
 
+;; Registry of compiled validator closures and the schema documents they were
+;; compiled from. Replaces the previous register-by-eval approach so that
+;; runtime schema registration works on ClojureScript.
+;; {:validators {spec-key (fn [x] boolean)}
+;;  :docs       {nsid schema-doc}}
+(defonce ^:private registry (atom {:validators {} :docs {}}))
+
+(defn registered-validator
+  "The compiled validator fn registered for this spec key, or nil."
+  [spec-key]
+  (get-in @registry [:validators spec-key]))
+
+(defn registered-schema
+  "The schema document registered for this NSID, or nil."
+  [nsid]
+  (get-in @registry [:docs nsid]))
+
+(defn- resolve-spec
+  "Something accepted by s/valid? for this spec key: the registered compiled
+  validator, or a hand-written/translated global spec. nil if neither exists."
+  [spec-key]
+  (or (registered-validator spec-key)
+      (s/get-spec spec-key)))
+
+(defn- normalize-lex-uri
+  "Normalize a `<nsid>#main` Lexicon URI to its bare `<nsid>` form."
+  [uri]
+  (if (str/ends-with? uri "#main")
+    (subs uri 0 (- (count uri) (count "#main")))
+    uri))
+
+(defn- lex-uri-spec-key
+  "lex-uri->spec-key with #main normalization and a guard for $type values
+  that are not Lexicon URIs (e.g. reserved or malformed types)."
+  [uri]
+  (when (string? uri)
+    (let [uri (normalize-lex-uri uri)]
+      (when (str/includes? (first (str/split uri #"#")) ".")
+        (lex-uri->spec-key uri)))))
+
 (defmethod field-type-def->spec "ref"
   [ctx {:keys [ref]}]
   ;; We could simply return the spec key here but that would
@@ -671,7 +714,7 @@
 (defmulti object-spec (fn [object] (if (:$type object) :typed :untyped)))
 
 (defmethod object-spec :typed [object]
-  (if-let [spec (s/get-spec (lex-uri->spec-key (:$type object)))]
+  (if-let [spec (some-> (:$type object) lex-uri-spec-key resolve-spec)]
     (s/and ::data/object
            spec)
     ::data/object))
@@ -689,6 +732,251 @@
 (defmethod field-type-def->spec "unknown"
   [ctx _]
   `(s/multi-spec object-spec identity))
+
+;; -----------------------------------------------------------------------------
+;; Validator compiler (schema -> predicate closures)
+;;
+;; Eval-free counterpart of the translator above: compiles conformed schema
+;; definitions into predicate closures stored in the registry. References
+;; resolve lazily through `resolve-spec` (registered validators first, then
+;; global specs), preserving the lazy-ref semantics of the translator.
+;; -----------------------------------------------------------------------------
+
+(defmulti ^:private compile-field-type
+  "Compile the conformed field type definition into a predicate closure."
+  (fn [ctx type-def] (:type type-def)))
+
+(defmethod compile-field-type "null"
+  [_ _]
+  nil?)
+
+(defmethod compile-field-type "boolean"
+  [_ {:keys [const] :as def}]
+  (let [has-const? (contains? def :const)]
+    (fn [x]
+      (and (boolean? x)
+           (or (not has-const?) (= const x))))))
+
+(defmethod compile-field-type "integer"
+  [_ {:keys [minimum maximum enum const] :as def}]
+  (let [enum (when enum (set enum))
+        has-const? (contains? def :const)]
+    (fn [x]
+      (and (s/valid? ::data/integer x)
+           (or (nil? minimum) (<= minimum x))
+           (or (nil? maximum) (<= x maximum))
+           (or (nil? enum) (contains? enum x))
+           (or (not has-const?) (= const x))))))
+
+(defn- compile-string-format
+  "The check predicate for the given string format name."
+  [format]
+  (let [spec (keyword "atproto.lexicon" format)]
+    #(s/valid? spec %)))
+
+(defmethod compile-field-type "string"
+  [_ {:keys [format maxLength minLength maxGraphemes minGraphemes enum const] :as def}]
+  (let [format-pred (when format (compile-string-format format))
+        enum (when enum (set enum))
+        has-const? (contains? def :const)]
+    (fn [x]
+      (and (string? x)
+           (or (nil? format-pred) (boolean (format-pred x)))
+           (or (nil? maxLength) (<= (utf8-length x) maxLength))
+           (or (nil? minLength) (<= minLength (utf8-length x)))
+           (or (nil? maxGraphemes) (<= (grapheme-length x) maxGraphemes))
+           (or (nil? minGraphemes) (<= minGraphemes (grapheme-length x)))
+           (or (nil? enum) (contains? enum x))
+           (or (not has-const?) (= const x))))))
+
+(defmethod compile-field-type "bytes"
+  [_ {:keys [minLength maxLength]}]
+  (fn [x]
+    (and (bytes? x)
+         (or (nil? minLength) (<= minLength (count x)))
+         (or (nil? maxLength) (<= (count x) maxLength)))))
+
+(defmethod compile-field-type "cid-link"
+  [_ _]
+  #(s/valid? ::data/link %))
+
+(defmethod compile-field-type "blob"
+  [_ {:keys [accept maxSize]}]
+  (fn [x]
+    (and (s/valid? ::data/blob x)
+         (or (nil? accept) (boolean (accept-mime-type? accept (:mimeType x))))
+         (or (nil? maxSize) (<= (:size x) maxSize)))))
+
+(defmethod compile-field-type "array"
+  [ctx {:keys [items minLength maxLength]}]
+  (let [item-pred (compile-field-type ctx items)]
+    (fn [x]
+      (and (s/valid? ::data/array x)
+           (or (nil? minLength) (<= minLength (count x)))
+           (or (nil? maxLength) (<= (count x) maxLength))
+           (every? item-pred x)))))
+
+(defn- compile-properties
+  "Compile object/params properties into {prop-key pred} and a required-keys vector."
+  [ctx {:keys [properties required nullable]}]
+  (let [nullable? (set (map keyword nullable))
+        prop-preds (reduce (fn [preds [prop-key prop-type]]
+                             (let [pred (compile-field-type (nest ctx (name prop-key))
+                                                            prop-type)]
+                               (assoc preds prop-key
+                                      (if (nullable? prop-key)
+                                        (fn [v] (or (nil? v) (pred v)))
+                                        pred))))
+                           {}
+                           properties)]
+    {:required (into [] (map keyword) required)
+     :prop-preds prop-preds}))
+
+(defn- props-valid?
+  [{:keys [required prop-preds]} x]
+  (and (every? #(contains? x %) required)
+       (every? (fn [[prop-key pred]]
+                 (or (not (contains? x prop-key))
+                     (boolean (pred (get x prop-key)))))
+               prop-preds)))
+
+(defmethod compile-field-type "object"
+  [ctx def]
+  (let [compiled (compile-properties ctx def)]
+    (fn [x]
+      (and (s/valid? ::data/object x)
+           (props-valid? compiled x)))))
+
+(defmethod compile-field-type "params"
+  [ctx def]
+  (let [compiled (compile-properties ctx def)]
+    (fn [x]
+      (and (map? x)
+           (props-valid? compiled x)))))
+
+(defmethod compile-field-type "token"
+  [_ _]
+  (fn [_] false))
+
+(defmethod compile-field-type "ref"
+  [ctx {:keys [ref]}]
+  (let [ref-key (lex-uri->spec-key (normalize-lex-uri (resolve-ref ctx ref)))]
+    ;; Resolve lazily so schemas can be registered in any order (and refs may
+    ;; cycle); missing specs are only detected at validation time, like the
+    ;; translator.
+    (fn [x]
+      (if-let [spec (resolve-spec ref-key)]
+        (s/valid? spec x)
+        (throw (ex-info (str "Unable to resolve Lexicon ref: " ref-key)
+                        {:spec ref-key}))))))
+
+(defmethod compile-field-type "union"
+  [ctx {:keys [refs closed]}]
+  (let [allowed (when closed
+                  (into #{}
+                        (mapcat (fn [ref]
+                                  (let [uri (normalize-lex-uri (resolve-ref ctx ref))]
+                                    (if (str/includes? uri "#")
+                                      [uri]
+                                      [uri (str uri "#main")]))))
+                        refs))]
+    (fn [x]
+      (and (map? x)
+           (contains? x :$type)
+           (or (nil? allowed) (contains? allowed (:$type x)))
+           (s/valid? (object-spec x) x)))))
+
+(defmethod compile-field-type "unknown"
+  [_ _]
+  (fn [x]
+    (s/valid? (object-spec x) x)))
+
+;; Primary types
+
+(defmulti ^:private compile-primary-type
+  "Compile the conformed primary type definition into a map of
+  spec-key -> predicate closure."
+  (fn [ctx primary-type-def] (:type primary-type-def)))
+
+(defmethod compile-primary-type "record"
+  [ctx {:keys [key record]}]
+  ;; The record key constraint is enforced separately (a record value is
+  ;; validated without an rkey in hand); see record-key-spec.
+  {(spec-key ctx) (compile-field-type ctx record)})
+
+(defn- compile-request
+  [ctx {:keys [parameters input]}]
+  (if (or parameters input)
+    (let [params-pred (when parameters
+                        (compile-field-type (nest ctx "params") parameters))
+          encoding-pattern (:encoding input)
+          body-pred (when-let [schema (:schema input)]
+                      (compile-field-type (nest ctx "body") schema))]
+      (fn [request]
+        (and (map? request)
+             (or (nil? params-pred)
+                 (boolean (params-pred (or (:params request) {}))))
+             (or (nil? encoding-pattern)
+                 (and (contains? request :encoding)
+                      (boolean (mime-type-pattern-match? encoding-pattern
+                                                         (:encoding request)))))
+             (or (nil? body-pred)
+                 (and (contains? request :body)
+                      (boolean (body-pred (:body request))))))))
+    any?))
+
+(defn- compile-response
+  [ctx {:keys [output]}]
+  (if output
+    (let [encoding-pattern (:encoding output)
+          body-pred (when-let [schema (:schema output)]
+                      (compile-field-type (nest ctx "body") schema))]
+      (fn [response]
+        (and (map? response)
+             (contains? response :encoding)
+             (boolean (mime-type-pattern-match? encoding-pattern
+                                                (:encoding response)))
+             (or (nil? body-pred)
+                 (and (contains? response :body)
+                      (boolean (body-pred (:body response))))))))
+    any?))
+
+(defmethod compile-primary-type "query"
+  [ctx def]
+  {(spec-key (nest ctx "request"))  (compile-request (nest ctx "request") def)
+   (spec-key (nest ctx "response")) (compile-response (nest ctx "response") def)})
+
+(defmethod compile-primary-type "procedure"
+  [ctx def]
+  {(spec-key (nest ctx "request"))  (compile-request (nest ctx "request") def)
+   (spec-key (nest ctx "response")) (compile-response (nest ctx "response") def)})
+
+(defmethod compile-primary-type "subscription"
+  [ctx {:keys [message] :as def}]
+  {(spec-key (nest ctx "request")) (compile-request (nest ctx "request") def)
+   (spec-key (nest ctx "message")) (if message
+                                     (compile-field-type (nest ctx "message")
+                                                         (:schema message))
+                                     any?)})
+
+(defn- compile-schema
+  "Compile every definition in the schema file into validator closures.
+
+  Returns a map of spec-key -> predicate. Throws if the schema is invalid."
+  [{:keys [id] :as file}]
+  (let [conformed (s/conform ::schema/file file)]
+    (when (= ::s/invalid conformed)
+      (throw (ex-info (s/explain-str ::schema/file file)
+                      (s/explain-data ::schema/file file))))
+    (reduce (fn [validators [kwd [def-kind def]]]
+              (let [ctx (cond-> (context id)
+                          (not= :main kwd) (nest (name kwd)))]
+                (case def-kind
+                  :primary (merge validators (compile-primary-type ctx def))
+                  :field   (assoc validators (spec-key ctx)
+                                  (compile-field-type ctx def)))))
+            {}
+            (:defs conformed))))
 
 ;; -----------------------------------------------------------------------------
 ;; Loading
@@ -721,11 +1009,22 @@
           lexicon)))
 
 (defn register-specs!
-  "Register the specs from this lexicon."
+  "Register validators for every schema in this Lexicon.
+
+  Eval-free (works on ClojureScript) and idempotent: re-registering a schema
+  replaces its validators. The compiled validators are consulted by
+  `record-spec`, `object-spec`, `request-spec-key`, `response-spec-key`, and
+  `message-spec-key`; references resolve through the registry first, then
+  through globally-defined specs."
   [lexicon]
   (doseq [schema (vals lexicon)]
-    (eval
-     `(do ~@(translate schema)))))
+    (let [validators (compile-schema schema)]
+      (swap! registry
+             (fn [r]
+               (-> r
+                   (update :validators merge validators)
+                   (assoc-in [:docs (:id schema)] schema))))))
+  nil)
 
 (defn type-def
   "The type definition for this Lexicon URL."
@@ -746,7 +1045,8 @@
 (defmethod record-spec :default
   [{:keys [$type] :as record}]
   (if *schema-validate*
-    (lex-uri->spec-key $type)
+    (let [k (lex-uri->spec-key $type)]
+      (or (registered-validator k) k))
     ;; even if we don't validate against the schema, we ensure it is valid ATProto data.
     ::data/object))
 
@@ -780,17 +1080,26 @@
           :opt-un [::encoding]))
 
 (defn request-spec-key
+  "Something accepted by s/valid? for this method's request: the registered
+  validator closure when the schema is registered, else a spec key."
   [nsid]
   (if *schema-validate*
-    (spec-key (nest {:ns nsid} "request"))
+    (let [k (spec-key (nest {:ns nsid} "request"))]
+      (or (registered-validator k) k))
     ::request))
 
 (defn response-spec-key
+  "Something accepted by s/valid? for this method's response: the registered
+  validator closure when the schema is registered, else a spec key."
   [nsid]
   (if *schema-validate*
-    (spec-key (nest {:ns nsid} "response"))
+    (let [k (spec-key (nest {:ns nsid} "response"))]
+      (or (registered-validator k) k))
     ::response))
 
 (defn message-spec-key
+  "Something accepted by s/valid? for this subscription's messages: the
+  registered validator closure when the schema is registered, else a spec key."
   [nsid]
-  (spec-key (nest {:ns nsid} "message")))
+  (let [k (spec-key (nest {:ns nsid} "message"))]
+    (or (registered-validator k) k)))
