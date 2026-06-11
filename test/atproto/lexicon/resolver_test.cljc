@@ -306,6 +306,19 @@
            (is (= "LexiconAuthorityNotFound" (:error result)))
            (is (not (.exists (io/file dir "manifest.edn")))))))))
 
+#?(:clj
+   (deftest ^:integration live-resolve-test
+     ;; Live-network verification, excluded from default CI. Run manually:
+     ;;   clojure -X:test :includes '[:integration]' :excludes '[]'
+     ;; (DNS _lexicon.feed.bsky.app is live today.)
+     (let [{:keys [error nsid uri cid lexicon] :as resp}
+           @(resolver/resolve-nsid "app.bsky.feed.post")]
+       (is (nil? error) (pr-str resp))
+       (is (= "app.bsky.feed.post" nsid))
+       (is (= "app.bsky.feed.post" (:id lexicon)))
+       (is (string? uri))
+       (is (string? cid)))))
+
 (deftest errors-not-cached-test
   (let [cache (resolver/memory-cache)
         first-pass (resolve-with-stubs {:dns-responses {}
