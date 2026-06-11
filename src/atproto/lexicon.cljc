@@ -975,6 +975,68 @@
   ;; nothing to validate at runtime
   {})
 
+(defn- request-parts-problems
+  "Spec problems for an invalid compiled request, with :path/:in pointing at
+  the offending request key (:params, :encoding, or :body) so consumers can
+  classify them (e.g. the XRPC server reports params problems before auth
+  and input problems after, keyed on the problem's :in)."
+  [{:keys [params-pred encoding-pattern body-pred]} path via in request]
+  (if-not (map? request)
+    [{:path (vec path) :pred 'clojure.core/map? :val request :via via :in (vec in)}]
+    (cond-> []
+      (and params-pred
+           (not (params-pred (or (:params request) {}))))
+      (conj {:path (conj (vec path) :params)
+             :pred 'atproto.lexicon/compiled-params-validator
+             :val (:params request)
+             :via via
+             :in (conj (vec in) :params)})
+
+      (and encoding-pattern
+           (not (and (contains? request :encoding)
+                     (mime-type-pattern-match? encoding-pattern
+                                               (:encoding request)))))
+      (conj {:path (conj (vec path) :encoding)
+             :pred (list 'atproto.lexicon/mime-type-pattern-match?
+                         (list :type (:type encoding-pattern)
+                               :subtype (:subtype encoding-pattern))
+                         '%)
+             :val (:encoding request)
+             :via via
+             :in (conj (vec in) :encoding)})
+
+      (and body-pred
+           (not (and (contains? request :body)
+                     (boolean (body-pred (:body request))))))
+      (conj {:path (conj (vec path) :body)
+             :pred 'atproto.lexicon/compiled-body-validator
+             :val (:body request)
+             :via via
+             :in (conj (vec in) :body)}))))
+
+(defn- reify-request-spec
+  "A spec object for a compiled request validator.
+
+  Compiled validators are plain closures everywhere else, but request specs
+  implement the Spec protocol so s/explain-data reports problems under the
+  offending request key instead of one opaque top-level predicate (the XRPC
+  server classifies params vs input problems from those paths)."
+  [parts]
+  (let [valid? (fn [request]
+                 (empty? (request-parts-problems parts [] [] [] request)))]
+    (reify
+      #?(:clj clojure.spec.alpha/Spec
+         :cljs cljs.spec.alpha/Spec)
+      (conform* [_ x] (if (valid? x) x ::s/invalid))
+      (unform* [_ y] y)
+      (explain* [_ path via in x]
+        (when-not (valid? x)
+          (request-parts-problems parts path via in x)))
+      (gen* [_ _ _ _]
+        (throw (ex-info "gen is not supported for compiled Lexicon request specs." {})))
+      (with-gen* [this _] this)
+      (describe* [_] 'atproto.lexicon/compiled-request-validator))))
+
 (defn- compile-request
   [ctx {:keys [parameters input]}]
   (if (or parameters input)
@@ -983,17 +1045,9 @@
           encoding-pattern (:encoding input)
           body-pred (when-let [schema (:schema input)]
                       (compile-field-type (nest ctx "body") schema))]
-      (fn [request]
-        (and (map? request)
-             (or (nil? params-pred)
-                 (boolean (params-pred (or (:params request) {}))))
-             (or (nil? encoding-pattern)
-                 (and (contains? request :encoding)
-                      (boolean (mime-type-pattern-match? encoding-pattern
-                                                         (:encoding request)))))
-             (or (nil? body-pred)
-                 (and (contains? request :body)
-                      (boolean (body-pred (:body request))))))))
+      (reify-request-spec {:params-pred params-pred
+                           :encoding-pattern encoding-pattern
+                           :body-pred body-pred}))
     any?))
 
 (defn- compile-response

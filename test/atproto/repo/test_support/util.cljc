@@ -1,6 +1,7 @@
 (ns atproto.repo.test-support.util
-  "Bulk key/record generators and repo-mutation helpers for the repo
-  tests. Port of packages/repo/tests/_util.ts."
+  "Helpers for the repo tests (async deref, error re-throw, blockstore
+  persistence, and the bad-commit scenario from
+  packages/repo/tests/_util.ts)."
   (:require [atproto.data :as data]
             [atproto.data.cbor :as cbor]
             [atproto.tid :as tid]
@@ -42,29 +43,12 @@
        (blockstore/put-block! storage cid bytes))
      cid)))
 
-(defn generate-bulk-data-keys
-  "{data-key cid} map of `count` random record keys."
-  ([count] (generate-bulk-data-keys count nil))
-  ([count storage]
-   (into {}
-         (map (fn [_]
-                [(str "com.example.record/" (tid/next-tid))
-                 (random-cid storage)]))
-         (range count))))
-
-(defn generate-object
-  []
-  {:name (random-str 100)})
-
 (defn save-mst
   "Persist a tree's unstored blocks; returns the root CID."
   [storage tree]
   (let [{:keys [root blocks]} (ok! (mst/unstored-blocks tree))]
     (blockstore/put-blocks! storage blocks)
     root))
-
-(def test-collections
-  ["com.example.posts" "com.example.likes"])
 
 #?(:clj
    (defn random-bytes
@@ -74,83 +58,11 @@
        b)))
 
 #?(:clj
-   (defn fill-repo
-     "Add items-per-collection random records to each test collection.
-     Returns {:repo repo' :data repo-contents}."
-     [repo keypair items-per-collection]
-     (let [{:keys [writes data]}
-           (reduce
-            (fn [acc coll]
-              (reduce
-               (fn [{:keys [writes data]} _]
-                 (let [rkey (tid/next-tid)
-                       record (generate-object)]
-                   {:writes (conj writes {:action :create
-                                          :collection coll
-                                          :rkey rkey
-                                          :value record})
-                    :data (assoc-in data [coll rkey] record)}))
-               acc
-               (range items-per-collection)))
-            {:writes [] :data {}}
-            test-collections)]
-       {:repo (ok! (result-of (repo/apply-writes repo writes keypair)))
-        :data data})))
-
-#?(:clj
-   (defn format-edit
-     "Format (without applying) a commit with random adds/updates/deletes
-     in each test collection. Returns {:commit commit-data :data contents}."
-     [repo prev-data keypair {:keys [adds updates deletes]
-                              :or {adds 0 updates 0 deletes 0}}]
-     (let [{:keys [writes data]}
-           (reduce
-            (fn [acc coll]
-              (let [shuffled (shuffle (vec (get prev-data coll {})))
-                    to-update (subvec shuffled 0 updates)
-                    to-delete (subvec shuffled updates (min (count shuffled)
-                                                            (+ updates deletes)))]
-                (as-> acc acc
-                  ;; adds
-                  (reduce (fn [{:keys [writes data]} _]
-                            (let [rkey (tid/next-tid)
-                                  record (generate-object)]
-                              {:writes (conj writes {:action :create
-                                                     :collection coll
-                                                     :rkey rkey
-                                                     :value record})
-                               :data (assoc-in data [coll rkey] record)}))
-                          acc
-                          (range adds))
-                  ;; updates
-                  (reduce (fn [{:keys [writes data]} [rkey _]]
-                            (let [record (generate-object)]
-                              {:writes (conj writes {:action :update
-                                                     :collection coll
-                                                     :rkey rkey
-                                                     :value record})
-                               :data (assoc-in data [coll rkey] record)}))
-                          acc
-                          to-update)
-                  ;; deletes
-                  (reduce (fn [{:keys [writes data]} [rkey _]]
-                            {:writes (conj writes {:action :delete
-                                                   :collection coll
-                                                   :rkey rkey})
-                             :data (update data coll dissoc rkey)})
-                          acc
-                          to-delete))))
-            {:writes [] :data prev-data}
-            test-collections)]
-       {:commit (ok! (result-of (repo/format-commit repo writes keypair)))
-        :data data})))
-
-#?(:clj
    (defn add-bad-commit
      "Apply a commit whose signature is over random bytes instead of the
      commit. Returns the new (bad) repo handle."
      [repo keypair]
-     (let [[cid new-blocks] (blockstore/add-block {} (generate-object))
+     (let [[cid new-blocks] (blockstore/add-block {} {:name (random-str 100)})
            tree (ok! (mst/add (:tree repo)
                               (str "com.example.test/" (tid/next-tid))
                               cid))

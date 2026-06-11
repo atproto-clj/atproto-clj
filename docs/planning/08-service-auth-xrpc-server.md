@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented on `claude/epic-cannon-wwck1e` (2026-06-11); pending live-PDS check (acceptance item 4) |
 | **Priority** | P1 |
 | **Estimated size** | M |
 | **Branch** | ws/08-service-auth-xrpc-server |
@@ -479,17 +479,17 @@ Run everything with `clj -X:test` (cognitect test-runner, already configured in 
 
 ## Acceptance criteria
 
-- [ ] `atproto.service-auth/create-jwt` produces tokens that `packages/xrpc-server` `verifyJwt` accepts (validated via the generated fixture suite in both directions).
-- [ ] `verify-jwt` accepts reference-minted fixture tokens and returns claims; every reference error name (`BadJwt`, `BadJwtType`, `JwtExpired`, `BadJwtAudience`, `BadJwtLexiconMethod`, `BadJwtIss`, `BadJwtSignature`) is produced by a test and carries `:status 401`.
-- [ ] Signature-failure path retries exactly once with `force-refresh? true` and only when the refreshed key differs.
-- [ ] `get-service-auth` returns `{:token ...}` from a real PDS (manual live check documented and performed once before merge).
-- [ ] `service-auth/session` attaches `Bearer` service JWTs with `lxm` = request NSID; verified by round-tripping against the SDK's own server with `service-auth-verifier`.
-- [ ] XRPC server: routes can declare auth; `handle` receives `:auth`; auth runs before input validation; unauthenticated routes unchanged (existing server tests still pass).
-- [ ] Error responses: JSON body always `{"error": <name>, "message": <msg>}`; status table matches `ResponseType` (400/401/403/404/406/413/415/429/500/501/502/503/504); unknown method → 501; malformed xrpc path → 400; 5xx bodies never contain internal exception messages; `clojure.edn` is properly required.
-- [ ] `atproto.xrpc.frames` encode/decode byte-exact against vendored reference fixtures.
-- [ ] A lexicon subscription endpoint served over http-kit streams binary frames to a vanilla websocket client, with error-frame + close 1008 and normal close 1000 semantics.
-- [ ] `RateLimiter` protocol exists, is invoked at the documented points, maps exceeded → 429; no production limiter shipped.
-- [ ] `clj -X:test` green on every merged PR; cljs compilation of touched .cljc namespaces not broken (service-auth/frames may be JVM-stubbed under `#?` like `runtime/jwt.cljc` is today, but must still read as cljc).
+- [x] `atproto.service-auth/create-jwt` produces tokens that `packages/xrpc-server` `verifyJwt` accepts (validated via the generated fixture suite in both directions).
+- [x] `verify-jwt` accepts reference-minted fixture tokens and returns claims; every reference error name (`BadJwt`, `BadJwtType`, `JwtExpired`, `BadJwtAudience`, `BadJwtLexiconMethod`, `BadJwtIss`, `BadJwtSignature`) is produced by a test and carries `:status 401`.
+- [x] Signature-failure path retries exactly once with `force-refresh? true` and only when the refreshed key differs.
+- [ ] `get-service-auth` returns `{:token ...}` from a real PDS (not performed: no live credentials in the implementation environment; instructions in the test ns comment block) (manual live check documented and performed once before merge).
+- [x] `service-auth/session` attaches `Bearer` service JWTs with `lxm` = request NSID; verified by round-tripping against the SDK's own server with `service-auth-verifier`.
+- [x] XRPC server: routes can declare auth; `handle` receives `:auth`; auth runs before input validation; unauthenticated routes unchanged (existing server tests still pass).
+- [x] Error responses: JSON body always `{"error": <name>, "message": <msg>}`; status table matches `ResponseType` (400/401/403/404/406/413/415/429/500/501/502/503/504); unknown method → 501; malformed xrpc path → 400; 5xx bodies never contain internal exception messages; `clojure.edn` is properly required.
+- [x] `atproto.xrpc.frames` encode/decode byte-exact against vendored reference fixtures.
+- [x] A lexicon subscription endpoint served over http-kit streams binary frames to a vanilla websocket client, with error-frame + close 1008 and normal close 1000 semantics.
+- [x] `RateLimiter` protocol exists, is invoked at the documented points, maps exceeded → 429; no production limiter shipped.
+- [x] `clj -X:test` green on every merged PR; cljs compilation of touched .cljc namespaces not broken (service-auth/frames may be JVM-stubbed under `#?` like `runtime/jwt.cljc` is today, but must still read as cljc).
 
 ## Milestones
 
@@ -499,6 +499,23 @@ Run everything with `clj -X:test` (cognitect test-runner, already configured in 
 4. **PR-4: frames.** `atproto.xrpc.frames` + vendored byte fixtures. **Gated on WS-02 contract merge**; if WS-02 slips, this PR carries the ns + tests behind a pending flag with a temporary test-only CBOR shim and is explicitly noted as such.
 5. **PR-5: websocket subscription transport.** `handle-subscription`, `subscription-request`, http-kit upgrade path in `ring.clj`, integration test with a countdown stream + auth + error-frame close codes.
 6. **PR-6 (small): polish.** Live-service verification write-up, docstrings, `cast/event`s at auth/subscription lifecycle points, README progress-matrix update *proposal* left to the orchestrator (README not owned by this workstream).
+
+## Implementation notes (2026-06-11)
+
+- Implemented against the merged WS-02/WS-03 contracts (no stubs needed); WS-06 not yet
+  merged, so `did-signing-key-resolver` runs against the current `identity/resolve-did`
+  and forwards `:force-refresh` for forward compatibility (its `:resolve-did` override is
+  the test seam).
+- http-kit's `AsyncChannel.serverClose` encodes only the 2-byte close status; the close
+  *reason* string cannot be attached (the `serverClose(int, String)` overload ignores the
+  reason). Close codes 1008/1000 are sent per the reference; the error name reaches
+  clients in the error frame body. Documented in `atproto.xrpc.server.ring`.
+- Cross-implementation fixtures: `test/atproto/service_auth/jwt_fixtures.json` generated
+  from `@atproto/xrpc-server` 0.11.1 / `@atproto/crypto` 0.5.0 (script committed beside
+  it); the reverse direction (Clojure-minted tokens verified by the reference `verifyJwt`)
+  was performed for both curves at implementation time.
+- WS-05 had not landed `atproto.sync.frame`; `atproto.xrpc.frames` is the only frame
+  codec, as required by overview §4.9 item 8.
 
 ## Risks & open questions
 

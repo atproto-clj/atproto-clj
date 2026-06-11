@@ -5,6 +5,7 @@
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [clojure.spec.alpha :as s]
             [atproto.runtime.json :as json]
             [atproto.lexicon :as lexicon])
   (:import [java.io File]
@@ -36,7 +37,13 @@
     (is (nil? (lexicon/register-specs! lex)))
     (testing "registered schemas produce validators"
       (binding [lexicon/*schema-validate* true]
-        (is (fn? (lexicon/request-spec-key "com.atproto.repo.getRecord")))
+        (let [request-spec (lexicon/request-spec-key "com.atproto.repo.getRecord")]
+          (is (s/valid? request-spec
+                        {:nsid "com.atproto.repo.getRecord"
+                         :params {:repo "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+                                  :collection "app.bsky.feed.post"
+                                  :rkey "3jzfcijpj2z2a"}}))
+          (is (not (s/valid? request-spec {:params {}}))))
         (is (fn? (lexicon/response-spec-key "com.atproto.repo.getRecord"))))
       (is (fn? (lexicon/registered-validator :app.bsky.feed/post)))
       (is (= "tid" (get-in (lexicon/registered-schema "app.bsky.feed.post")

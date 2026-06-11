@@ -316,6 +316,13 @@
    :relevant-blocks block-map   ;; new-blocks + covering-proof blocks
    :removed-cids cid-set}
   or {:error \"KeyAlreadyExists\"/\"KeyNotFound\"/\"InvalidWriteOp\" ...}.
+
+  Note that :removed-cids is structural (TS parity): when two records
+  hold identical content they share one block, and deleting/updating one
+  of them lists the shared cid as removed even though the other record
+  still references it. Storage layers that index records are responsible
+  for filtering such cids before deleting blocks, as the reference PDS
+  does (packages/pds/src/actor-store/repo/transactor.ts:163-170).
   Port of packages/repo/src/repo.ts:118-191."
   [repo writes signing-key & {:as opts}]
   (let [[cb val] (i/platform-async (async-opts opts))]
