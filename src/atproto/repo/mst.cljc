@@ -558,15 +558,18 @@
 
 (defn- walk-from
   "Lazy seq of entries on the path to key and everything after it.
-  Port of mst.ts walkFrom (:554-580)."
+  Port of mst.ts walkFrom (:554-580), except an exact-match leaf at the
+  split index is yielded only once (the reference yields it twice; its
+  `list` masks the duplicate by skipping `key === after`, but
+  `listWithPrefix` would surface it)."
   [tree key]
   (cons tree
         (lazy-seq
          (let [entries (get-entries tree)
                index (find-gt-or-equal-leaf-index entries key)
                found (at-index entries index)
-               head (if (and (leaf-entry? found) (= (:key found) key))
-                      [found]
+               ;; an exact match at index is covered by the tail below
+               head (when-not (and (leaf-entry? found) (= (:key found) key))
                       (let [prev (at-index entries (dec index))]
                         (cond
                           (and (leaf-entry? prev) (= (:key prev) key)) [prev]

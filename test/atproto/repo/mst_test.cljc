@@ -1,13 +1,25 @@
 (ns atproto.repo.mst-test
-  "MST unit + interop tests, ported from packages/repo/tests/mst.test.ts
-  and commit-proofs.test.ts in the TypeScript reference implementation."
+  "MST tests.
+
+  Interop vectors (known root CIDs, layer assignments, the reference's
+  key accept/reject lists, and the vendored commit-proof fixtures) are
+  example-based because they pin cross-implementation byte
+  compatibility; everything behavioral is property-based.
+
+  Ported from packages/repo/tests/mst.test.ts and commit-proofs.test.ts
+  in the TypeScript reference implementation."
   (:require #?(:clj [clojure.test :refer :all]
                :cljs [cljs.test :refer :all])
             #?(:clj [clojure.java.io :as io])
+            [clojure.string :as str]
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
             [atproto.data :as data]
             [atproto.runtime.json :as json]
             [atproto.repo.blockstore :as blockstore]
             [atproto.repo.mst :as mst]
+            [atproto.repo.test-support.gen :as tgen]
             [atproto.repo.test-support.util :as util]))
 
 (def cid1
@@ -25,28 +37,33 @@
   [tree key]
   (util/ok! (mst/add tree key cid1)))
 
+(defn- build-tree
+  "Tree over a fresh memory blockstore from [key cid] pairs, in order."
+  ([pairs] (build-tree (blockstore/memory-blockstore) pairs))
+  ([bs pairs]
+   (reduce (fn [t [k v]] (util/ok! (mst/add t k v)))
+           (mst/create bs)
+           pairs)))
+
 ;; -----------------------------------------------------------------------------
 ;; Utils
 ;; -----------------------------------------------------------------------------
 
-(deftest test-count-prefix-len
-  (are [expected a b] (= expected (mst/count-prefix-len a b))
-    3 "abc" "abc"
-    0 "" "abc"
-    0 "abc" ""
-    2 "ab" "abc"
-    2 "abc" "ab"
-    3 "abcde" "abc"
-    3 "abc" "abcde"
-    3 "abcde" "abc1"
-    2 "abcde" "abb"
-    0 "abcde" "qbb"
-    0 "" "asdf"
-    3 "abc" "abc\u0000"
-    3 "abc\u0000" "abc"))
+(def gen-prefix-pair
+  "[prefix a b] where a and b do not extend the common prefix."
+  (gen/such-that (fn [[_ a b]]
+                   (or (empty? a) (empty? b) (not= (first a) (first b))))
+                 (gen/tuple gen/string-alphanumeric
+                            gen/string-alphanumeric
+                            gen/string-alphanumeric)
+                 100))
+
+(defspec count-prefix-len-finds-the-common-prefix 200
+  (prop/for-all [[p a b] gen-prefix-pair]
+    (= (count p) (mst/count-prefix-len (str p a) (str p b)))))
 
 (deftest test-leading-zeros
-  ;; layer assignments documented in mst.test.ts comments
+  ;; interop vectors: layer assignments documented in mst.test.ts comments
   (are [layer key] (= layer (mst/leading-zeros key))
     0 "com.example.record/3jqfcqzm3fn2j"
     0 "com.example.record/3jqfcqzm3fo2j"
@@ -64,15 +81,26 @@
     2 "com.example.record/3jqfcqzm3fx2j"))
 
 ;; -----------------------------------------------------------------------------
-;; Allowable keys (mst.test.ts:176-254)
+;; Key validation
 ;; -----------------------------------------------------------------------------
 
-(deftest test-key-validation
+(defspec generated-valid-keys-are-accepted 200
+  (prop/for-all [k tgen/gen-mst-key]
+    (and (mst/valid-key? k)
+         (not (:error (mst/add (mst/create (blockstore/memory-blockstore))
+                               k cid1))))))
+
+(defspec generated-invalid-keys-are-rejected 200
+  (prop/for-all [k tgen/gen-invalid-mst-key]
+    (and (not (mst/valid-key? k))
+         (= "InvalidMstKey"
+            (:error (mst/add (mst/create (blockstore/memory-blockstore))
+                             k cid1))))))
+
+(deftest test-key-validation-interop
+  ;; the reference's accept/reject lists, kept verbatim (mst.test.ts:176-254)
   (testing "rejected keys"
-    (are [key] (and (not (mst/valid-key? key))
-                    (= "InvalidMstKey"
-                       (:error (mst/add (mst/create (blockstore/memory-blockstore))
-                                        key cid1))))
+    (are [key] (not (mst/valid-key? key))
       ""
       "asdf"
       "nested/collection/asdf"
@@ -99,9 +127,7 @@
       (str "coll/" (apply str (repeat 1020 "a")))))
 
   (testing "allowed keys"
-    (are [key] (and (mst/valid-key? key)
-                    (not (:error (mst/add (mst/create (blockstore/memory-blockstore))
-                                          key cid1))))
+    (are [key] (mst/valid-key? key)
       "coll/3jui7kd54zh2y"
       "coll/self"
       "coll/example.com"
@@ -228,112 +254,212 @@
           (is (= l2root (root-str without-d))))))))
 
 ;; -----------------------------------------------------------------------------
-;; Bulk operations (mst.test.ts:9-157)
+;; Model-based properties
 ;; -----------------------------------------------------------------------------
 
-(deftest test-bulk-operations
-  (let [bs (blockstore/memory-blockstore)
-        mapping (util/generate-bulk-data-keys 1000 bs)
-        shuffled (shuffle (vec mapping))
-        tree (reduce (fn [t [k v]] (util/ok! (mst/add t k v)))
-                     (mst/create bs)
-                     shuffled)]
+(defspec tree-matches-model-map 50
+  (prop/for-all [[m order absent-key]
+                 (gen/let [m tgen/gen-key-cid-map
+                           order (gen/shuffle (vec m))
+                           absent-key (gen/such-that #(not (contains? m %))
+                                                     tgen/gen-mst-key
+                                                     100)]
+                   [m order absent-key])]
+    (let [tree (build-tree order)]
+      (and (= (sort (keys m)) (map :key (mst/leaf-seq tree)))
+           (every? (fn [[k v]] (= v (util/ok! (mst/get-value tree k)))) m)
+           (nil? (util/ok! (mst/get-value tree absent-key)))
+           (= "KeyAlreadyExists"
+              (:error (mst/add tree (key (first m)) cid1)))
+           (= "KeyNotFound"
+              (:error (mst/update-value tree absent-key cid1)))
+           (= "KeyNotFound"
+              (:error (mst/delete tree absent-key)))))))
 
-    (testing "adds records"
-      (doseq [[k v] shuffled]
-        (is (= v (util/ok! (mst/get-value tree k)))))
-      (is (= 1000 (leaf-count tree))))
+(defspec roots-are-insertion-order-independent 50
+  (prop/for-all [[order1 order2]
+                 (gen/let [m tgen/gen-key-cid-map
+                           order1 (gen/shuffle (vec m))
+                           order2 (gen/shuffle (vec m))]
+                   [order1 order2])]
+    (= (util/ok! (mst/pointer (build-tree order1)))
+       (util/ok! (mst/pointer (build-tree order2))))))
 
-    (testing "edits records"
-      (let [to-edit (take 100 shuffled)
-            edited (mapv (fn [[k _]] [k (util/random-cid)]) to-edit)
-            tree' (reduce (fn [t [k v]] (util/ok! (mst/update-value t k v)))
+(defspec updates-and-deletes-match-model 50
+  (prop/for-all [[m order n-upd n-del upd-cids]
+                 (gen/let [m tgen/gen-key-cid-map
+                           order (gen/shuffle (vec m))
+                           n-upd (gen/choose 0 (count m))
+                           n-del (gen/choose 0 (- (count m) n-upd))
+                           upd-cids (gen/vector tgen/gen-cid n-upd)]
+                   [m order n-upd n-del upd-cids])]
+    (let [tree (build-tree (vec m))
+          to-update (map vector (map first (take n-upd order)) upd-cids)
+          to-delete (map first (take n-del (drop n-upd order)))
+          updated (reduce (fn [t [k v]] (util/ok! (mst/update-value t k v)))
                           tree
-                          edited)]
-        (doseq [[k v] edited]
-          (is (= v (util/ok! (mst/get-value tree' k)))))
-        (is (= 1000 (leaf-count tree')))))
+                          to-update)
+          final (reduce (fn [t k] (util/ok! (mst/delete t k)))
+                        updated
+                        to-delete)
+          model (reduce dissoc (into m to-update) to-delete)]
+      (and (= (sort (keys model)) (map :key (mst/leaf-seq final)))
+           (every? (fn [[k v]] (= v (util/ok! (mst/get-value final k)))) model)
+           (every? (fn [k] (nil? (util/ok! (mst/get-value final k)))) to-delete)))))
 
-    (testing "deletes records"
-      (let [to-delete (take 100 shuffled)
-            the-rest (drop 100 shuffled)
-            tree' (reduce (fn [t [k _]] (util/ok! (mst/delete t k)))
-                          tree
-                          to-delete)]
-        (is (= 900 (leaf-count tree')))
-        (doseq [[k _] to-delete]
-          (is (nil? (util/ok! (mst/get-value tree' k)))))
-        (doseq [[k v] the-rest]
-          (is (= v (util/ok! (mst/get-value tree' k)))))))
+(defspec save-and-load-round-trips 50
+  (prop/for-all [m tgen/gen-key-cid-map]
+    (let [bs (blockstore/memory-blockstore)
+          tree (build-tree bs (vec m))
+          root (util/save-mst bs tree)
+          loaded (mst/load bs root)]
+      (and (= (util/ok! (mst/pointer tree)) (util/ok! (mst/pointer loaded)))
+           (= (mapv (juxt :key :value) (mst/leaf-seq tree))
+              (mapv (juxt :key :value) (mst/leaf-seq loaded)))))))
 
-    (testing "is order independent"
-      (let [recreated (reduce (fn [t [k v]] (util/ok! (mst/add t k v)))
-                              (mst/create bs)
-                              (shuffle (vec mapping)))]
-        (is (= (util/ok! (mst/pointer tree))
-               (util/ok! (mst/pointer recreated))))))
-
-    (testing "saves and loads from blockstore"
-      (let [root (util/save-mst bs tree)
-            loaded (mst/load bs root)]
-        (is (= (util/ok! (mst/pointer tree))
-               (util/ok! (mst/pointer loaded))))
-        (is (= (mapv (juxt :key :value) (mst/leaf-seq tree))
-               (mapv (juxt :key :value) (mst/leaf-seq loaded))))))
-
-    (testing "diffs"
-      (let [to-add (vec (util/generate-bulk-data-keys 100 bs))
-            to-edit (->> shuffled (drop 500) (take 100))
-            to-del (->> shuffled (drop 400) (take 100))
-            expected-adds (into {} (map (fn [[k v]] [k {:key k :cid v}])) to-add)
-            with-adds (reduce (fn [t [k v]] (util/ok! (mst/add t k v))) tree to-add)
-            [with-edits expected-updates]
-            (reduce (fn [[t expected] [k prev]]
-                      (let [updated (util/random-cid)]
-                        [(util/ok! (mst/update-value t k updated))
-                         (assoc expected k {:key k :prev prev :cid updated})]))
-                    [with-adds {}]
-                    to-edit)
-            to-diff (reduce (fn [t [k _]] (util/ok! (mst/delete t k))) with-edits to-del)
-            expected-dels (into {} (map (fn [[k v]] [k {:key k :cid v}])) to-del)
-            diff (util/ok! (mst/diff to-diff tree))]
-        (is (= 100 (count (:adds diff))))
-        (is (= 100 (count (:updates diff))))
-        (is (= 100 (count (:deletes diff))))
-        (is (= expected-adds (:adds diff)))
-        (is (= expected-updates (:updates diff)))
-        (is (= expected-dels (:deletes diff)))
-        ;; ensure we correctly report all added CIDs
-        (doseq [entry (mst/entry-seq to-diff)]
-          (let [cid (if (mst/tree? entry)
-                      (util/ok! (mst/pointer entry))
-                      (:value entry))]
-            (is (or (blockstore/has-block? bs cid)
-                    (contains? (:new-mst-blocks diff) cid)
-                    (contains? (:new-leaf-cids diff) cid)))))))))
+(defspec list-operations-match-model 50
+  (prop/for-all [[m after before limit prefix]
+                 (gen/let [m tgen/gen-key-cid-map
+                           after (gen/one-of [(gen/return nil)
+                                              (gen/elements (keys m))
+                                              tgen/gen-mst-key])
+                           before (gen/one-of [(gen/return nil)
+                                               (gen/elements (keys m))
+                                               tgen/gen-mst-key])
+                           limit (gen/one-of [(gen/return nil)
+                                              (gen/choose 0 (inc (count m)))])
+                           prefix (gen/one-of [(gen/elements (map #(subs % 0 (min 4 (count %)))
+                                                                  (keys m)))
+                                               tgen/gen-key-segment])]
+                   [m after before limit prefix])]
+    (let [tree (build-tree (vec m))
+          sorted-keys (sort (keys m))
+          model (cond->> sorted-keys
+                  after (filter #(pos? (compare % after)))
+                  before (filter #(neg? (compare % before)))
+                  limit (take limit))]
+      (and (= (vec model)
+              (mapv :key (util/ok! (mst/list-keys tree
+                                                  :after after
+                                                  :before before
+                                                  :limit limit))))
+           (= (vec (filter #(str/starts-with? % prefix) sorted-keys))
+              (mapv :key (util/ok! (mst/list-with-prefix tree prefix))))))))
 
 ;; -----------------------------------------------------------------------------
-;; List operations
+;; Diff properties
 ;; -----------------------------------------------------------------------------
 
-(deftest test-list-operations
-  (let [bs (blockstore/memory-blockstore)
-        keys ["co.ll/key1" "co.ll/key3" "co.ll/key5" "other.coll/key2"]
-        tree (reduce add! (mst/create bs) (shuffle keys))]
-    (is (= (sort keys) (map :key (mst/leaf-seq tree))))
-    (is (= ["co.ll/key3" "co.ll/key5" "other.coll/key2"]
-           (map :key (util/ok! (mst/list-keys tree :after "co.ll/key1")))))
-    (is (= ["co.ll/key1" "co.ll/key3"]
-           (map :key (util/ok! (mst/list-keys tree :before "co.ll/key5")))))
-    (is (= ["co.ll/key1"]
-           (map :key (util/ok! (mst/list-keys tree :limit 1)))))
-    (is (= ["co.ll/key1" "co.ll/key3" "co.ll/key5"]
-           (map :key (util/ok! (mst/list-with-prefix tree "co.ll/")))))
-    (is (= ["other.coll/key2"]
-           (map :key (util/ok! (mst/list-with-prefix tree "other.coll/")))))))
+(def gen-tree-and-edit
+  "[base-map adds updates deletes]: adds are disjoint from base, updates
+  and deletes are disjoint subsets of base."
+  (gen/let [m tgen/gen-key-cid-map
+            raw-adds tgen/gen-key-cid-map
+            order (gen/shuffle (vec m))
+            n-upd (gen/choose 0 (count m))
+            n-del (gen/choose 0 (- (count m) n-upd))
+            upd-cids (gen/vector tgen/gen-cid n-upd)]
+    [m
+     (vec (apply dissoc raw-adds (keys m)))
+     (mapv vector (map first (take n-upd order)) upd-cids)
+     (mapv first (take n-del (drop n-upd order)))]))
+
+(defspec diff-reports-exactly-the-applied-ops 50
+  (prop/for-all [[m adds updates deletes] gen-tree-and-edit]
+    (let [bs (blockstore/memory-blockstore)
+          base (build-tree bs (vec m))
+          with-adds (reduce (fn [t [k v]] (util/ok! (mst/add t k v))) base adds)
+          with-upds (reduce (fn [t [k v]] (util/ok! (mst/update-value t k v)))
+                            with-adds
+                            updates)
+          final (reduce (fn [t k] (util/ok! (mst/delete t k))) with-upds deletes)
+          diff (util/ok! (mst/diff final base))
+          ;; updates to the same cid are invisible to a content-addressed diff
+          visible-updates (remove (fn [[k v]] (= v (get m k))) updates)]
+      (and (= (into {} (map (fn [[k v]] [k {:key k :cid v}])) adds)
+              (:adds diff))
+           (= (into {} (map (fn [[k v]] [k {:key k :prev (get m k) :cid v}]))
+                    visible-updates)
+              (:updates diff))
+           (= (into {} (map (fn [k] [k {:key k :cid (get m k)}])) deletes)
+              (:deletes diff))))))
+
+(defspec diff-against-nil-reports-all-blocks 50
+  (prop/for-all [m tgen/gen-key-cid-map]
+    (let [tree (build-tree (vec m))
+          diff (util/ok! (mst/diff tree nil))]
+      (and (= (into {} (map (fn [[k v]] [k {:key k :cid v}])) m)
+              (:adds diff))
+           (empty? (:updates diff))
+           (empty? (:deletes diff))
+           (empty? (:removed-cids diff))
+           ;; every node of the tree is reported as a new block or leaf
+           (every? (fn [entry]
+                     (if (mst/tree? entry)
+                       (contains? (:new-mst-blocks diff)
+                                  (util/ok! (mst/pointer entry)))
+                       (contains? (:new-leaf-cids diff) (:value entry))))
+                   (mst/entry-seq tree))))))
+
+(defspec diff-reported-blocks-cover-the-new-tree 50
+  (prop/for-all [[m adds updates deletes] gen-tree-and-edit]
+    (let [bs (blockstore/memory-blockstore)
+          base (build-tree bs (vec m))
+          _ (util/save-mst bs base)
+          final (as-> base t
+                  (reduce (fn [t [k v]] (util/ok! (mst/add t k v))) t adds)
+                  (reduce (fn [t [k v]] (util/ok! (mst/update-value t k v))) t updates)
+                  (reduce (fn [t k] (util/ok! (mst/delete t k))) t deletes))
+          diff (util/ok! (mst/diff final base))
+          ;; leaf record blocks live outside the MST; the old tree's
+          ;; leaf cids stand in for "already known to the consumer"
+          base-leaf-cids (set (vals m))]
+      ;; every reachable cid of the new tree is either part of the old
+      ;; tree (stored node or known leaf) or reported by the diff
+      (every? (fn [entry]
+                (if (mst/tree? entry)
+                  (let [cid (util/ok! (mst/pointer entry))]
+                    (or (blockstore/has-block? bs cid)
+                        (contains? (:new-mst-blocks diff) cid)))
+                  (or (contains? base-leaf-cids (:value entry))
+                      (contains? (:new-leaf-cids diff) (:value entry)))))
+              (mst/entry-seq final)))))
 
 ;; -----------------------------------------------------------------------------
-;; Commit proof fixtures (commit-proofs.test.ts)
+;; Covering-proof properties
+;; -----------------------------------------------------------------------------
+
+(defspec covering-proofs-make-edits-invertible 30
+  (prop/for-all [[m adds deletes invert-order]
+                 (gen/let [[m adds _ deletes] gen-tree-and-edit
+                           invert-order (gen/shuffle
+                                         (concat (map (fn [[k _]] [:del k]) adds)
+                                                 (map (fn [k] [:add k]) deletes)))]
+                   [m adds deletes invert-order])]
+    (let [base (build-tree (vec m))
+          root-before (util/ok! (mst/pointer base))
+          final (as-> base t
+                  (reduce (fn [t [k v]] (util/ok! (mst/add t k v))) t adds)
+                  (reduce (fn [t k] (util/ok! (mst/delete t k))) t deletes))
+          changed-keys (concat (map first adds) deletes)
+          proof (reduce (fn [acc k]
+                          (merge acc (util/ok! (mst/covering-proof final k))))
+                        {}
+                        changed-keys)
+          ;; invert the edit over a blockstore holding ONLY the proof blocks
+          proof-bs (blockstore/memory-blockstore proof)
+          add-cids (into {} adds)
+          del-cids (select-keys m deletes)
+          inverted (reduce (fn [t [op k]]
+                             (case op
+                               :del (util/ok! (mst/delete t k))
+                               :add (util/ok! (mst/add t k (get del-cids k)))))
+                           (mst/load proof-bs (util/ok! (mst/pointer final)))
+                           invert-order)]
+      (= root-before (util/ok! (mst/pointer inverted))))))
+
+;; -----------------------------------------------------------------------------
+;; Commit proof fixtures (interop, commit-proofs.test.ts)
 ;; -----------------------------------------------------------------------------
 
 (defn- load-fixtures

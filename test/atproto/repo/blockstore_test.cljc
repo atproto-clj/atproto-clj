@@ -1,92 +1,115 @@
 (ns atproto.repo.blockstore-test
   (:require #?(:clj [clojure.test :refer :all]
                :cljs [cljs.test :refer :all])
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
             [atproto.data :as data]
             [atproto.data.cbor :as cbor]
             [atproto.runtime.bytes :as bytes]
             [atproto.repo.blockstore :as blockstore]
-            [atproto.repo.test-support.util :as util]))
+            [atproto.repo.test-support.gen :as tgen]))
 
-(defn- block-of
-  [value]
-  (let [bytes (cbor/encode value)]
-    [(data/cid-link bytes) bytes]))
+(def gen-block-map
+  (gen/map tgen/gen-cid tgen/gen-bytes {:max-elements 15}))
 
-(deftest test-memory-blockstore
-  (let [bs (blockstore/memory-blockstore)
-        [cid bytes] (block-of {:a 1})
-        [cid2 bytes2] (block-of {:b 2})
-        missing-cid (util/random-cid)]
+(def gen-cids
+  (gen/vector tgen/gen-cid 0 10))
 
-    (testing "empty store"
-      (is (nil? (blockstore/get-bytes bs cid)))
-      (is (false? (blockstore/has-block? bs cid)))
-      (is (nil? (blockstore/get-root bs)))
-      (is (= {:blocks {} :missing [cid]}
-             (blockstore/get-blocks bs [cid]))))
+(defn- lookups-match?
+  "get-bytes/has-block?/get-blocks against bs agree with the model map
+  for every queried cid."
+  [bs model queried]
+  (let [{:keys [blocks missing]} (blockstore/get-blocks bs queried)]
+    (and (every? (fn [cid]
+                   (if-let [expected (get model cid)]
+                     (and (blockstore/has-block? bs cid)
+                          (bytes/eq? expected (blockstore/get-bytes bs cid))
+                          (bytes/eq? expected (get blocks cid)))
+                     (and (not (blockstore/has-block? bs cid))
+                          (nil? (blockstore/get-bytes bs cid))
+                          (not (contains? blocks cid)))))
+                 queried)
+         ;; get-blocks partitions the query exactly by membership
+         (= (set (filter #(contains? model %) queried)) (set (keys blocks)))
+         (= (vec (remove #(contains? model %) queried)) missing))))
 
-    (testing "put and get"
-      (blockstore/put-block! bs cid bytes)
-      (blockstore/put-blocks! bs {cid2 bytes2})
-      (is (bytes/eq? bytes (blockstore/get-bytes bs cid)))
-      (is (blockstore/has-block? bs cid2))
-      (let [{:keys [blocks missing]} (blockstore/get-blocks bs [cid cid2 missing-cid])]
-        (is (= [missing-cid] missing))
-        (is (= #{cid cid2} (set (keys blocks))))))
+(defspec memory-blockstore-matches-model 100
+  (prop/for-all [seeded gen-block-map
+                 added gen-block-map
+                 extra gen-cids]
+    (let [bs (blockstore/memory-blockstore seeded)]
+      (doseq [[cid bytes] added]
+        (blockstore/put-block! bs cid bytes))
+      (let [model (merge seeded added)]
+        (lookups-match? bs model (concat (keys model) extra))))))
 
-    (testing "root"
-      (blockstore/update-root! bs cid "3jqfcqzm3fo2j")
-      (is (= cid (blockstore/get-root bs))))
+(defspec overlay-prefers-staged-then-saved 100
+  (prop/for-all [staged-map gen-block-map
+                 saved-map gen-block-map
+                 extra gen-cids]
+    (let [bs (blockstore/overlay (blockstore/memory-blockstore staged-map)
+                                 (blockstore/memory-blockstore saved-map))
+          model (merge saved-map staged-map)]
+      (lookups-match? bs model (concat (keys model) extra)))))
 
-    (testing "apply-commit!"
-      (blockstore/apply-commit! bs {:cid cid2
-                                    :rev "3jqfcqzm3fp2j"
-                                    :new-blocks {cid2 bytes2}
-                                    :removed-cids #{cid}})
-      (is (= cid2 (blockstore/get-root bs)))
-      (is (not (blockstore/has-block? bs cid)))
-      (is (blockstore/has-block? bs cid2)))))
+(defspec apply-commit-removes-then-adds-and-sets-root 100
+  (prop/for-all [[initial new-blocks removed root rev]
+                 (gen/let [initial gen-block-map
+                           new-blocks gen-block-map
+                           n-rm (gen/choose 0 (count initial))
+                           rm-order (gen/shuffle (keys initial))
+                           root tgen/gen-cid]
+                   [initial new-blocks (set (take n-rm rm-order)) root "3jqfcqzm3fo2j"])]
+    (let [bs (blockstore/memory-blockstore initial)]
+      (blockstore/apply-commit! bs {:cid root
+                                    :rev rev
+                                    :new-blocks new-blocks
+                                    :removed-cids removed})
+      (let [model (merge (apply dissoc initial removed) new-blocks)]
+        (and (= root (blockstore/get-root bs))
+             (lookups-match? bs model (concat (keys initial) (keys new-blocks))))))))
 
-(deftest test-seeded-blockstore
-  (let [[cid bytes] (block-of {:a 1})
+(defspec put-blocks-equals-individual-puts 100
+  (prop/for-all [block-map gen-block-map]
+    (let [batch (blockstore/memory-blockstore)
+          single (blockstore/memory-blockstore)]
+      (blockstore/put-blocks! batch block-map)
+      (doseq [[cid bytes] block-map]
+        (blockstore/put-block! single cid bytes))
+      (and (lookups-match? batch block-map (keys block-map))
+           (lookups-match? single block-map (keys block-map))))))
+
+(defspec add-block-read-block-round-trips 100
+  (prop/for-all [value (gen/map (gen/fmap keyword gen/string-alphanumeric)
+                                (gen/one-of [tgen/gen-data-int
+                                             gen/string
+                                             gen/boolean])
+                                {:max-elements 5})]
+    (let [[cid block-map] (blockstore/add-block {} value)
+          bs (blockstore/memory-blockstore block-map)
+          {:keys [data bytes] :as res} (blockstore/read-block bs cid map?)]
+      (and (data/cid-link? cid)
+           (nil? (:error res))
+           (= value data)
+           (true? (data/verify-cid cid bytes))))))
+
+;; -----------------------------------------------------------------------------
+;; read-block error shapes
+;; -----------------------------------------------------------------------------
+
+(deftest test-read-block-errors
+  (let [bytes (cbor/encode {:a 1})
+        cid (data/cid-link bytes)
         bs (blockstore/memory-blockstore {cid bytes})]
-    (is (blockstore/has-block? bs cid))))
 
-(deftest test-overlay
-  (let [[cid1 bytes1] (block-of {:a 1})
-        [cid2 bytes2] (block-of {:b 2})
-        missing-cid (util/random-cid)
-        staged (blockstore/memory-blockstore {cid1 bytes1})
-        saved (blockstore/memory-blockstore {cid2 bytes2})
-        bs (blockstore/overlay staged saved)]
-    (is (bytes/eq? bytes1 (blockstore/get-bytes bs cid1)))
-    (is (bytes/eq? bytes2 (blockstore/get-bytes bs cid2)))
-    (is (nil? (blockstore/get-bytes bs missing-cid)))
-    (is (blockstore/has-block? bs cid1))
-    (is (blockstore/has-block? bs cid2))
-    (is (not (blockstore/has-block? bs missing-cid)))
-    (let [{:keys [blocks missing]} (blockstore/get-blocks bs [cid1 cid2 missing-cid])]
-      (is (= #{cid1 cid2} (set (keys blocks))))
-      (is (= [missing-cid] missing)))))
-
-(deftest test-read-block
-  (let [[cid bytes] (block-of {:a 1})
-        bs (blockstore/memory-blockstore {cid bytes})]
-
-    (testing "decodes a present block"
-      (let [{:keys [data] :as res} (blockstore/read-block bs cid)]
-        (is (nil? (:error res)))
-        (is (= {:a 1} data))
-        (is (bytes/eq? bytes (:bytes res)))))
-
-    (testing "spec validation"
-      (is (nil? (:error (blockstore/read-block bs cid map?))))
+    (testing "spec validation failure"
       (let [res (blockstore/read-block bs cid string?)]
         (is (= "InvalidBlock" (:error res)))
         (is (= cid (:cid res)))))
 
     (testing "missing block"
-      (let [missing-cid (util/random-cid)
+      (let [missing-cid (data/cid-link (bytes/utf8-bytes "elsewhere"))
             res (blockstore/read-block bs missing-cid)]
         (is (= "MissingBlock" (:error res)))
         (is (= missing-cid (:cid res)))))
@@ -97,9 +120,3 @@
             junk-cid (data/cid-link junk)
             bs (blockstore/memory-blockstore {junk-cid junk})]
         (is (= "InvalidBlock" (:error (blockstore/read-block bs junk-cid))))))))
-
-(deftest test-add-block
-  (let [[cid block-map] (blockstore/add-block {} {:a 1})]
-    (is (data/cid-link? cid))
-    (is (contains? block-map cid))
-    (is (= {:a 1} (cbor/decode (get block-map cid))))))

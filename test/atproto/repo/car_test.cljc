@@ -1,22 +1,40 @@
 (ns atproto.repo.car-test
-  "CAR v1 tests, ported from packages/repo/tests/car.test.ts plus
-  framing-error and JVM streaming coverage."
+  "CAR v1 tests.
+
+  The vendored fixtures stay example-based (they pin byte-exact interop
+  with the reference implementation); round-trip, tamper-detection, and
+  truncation behavior are property-based. Ported from
+  packages/repo/tests/car.test.ts plus JVM streaming coverage."
   (:require #?(:clj [clojure.test :refer :all]
                :cljs [cljs.test :refer :all])
             #?(:clj [clojure.java.io :as io])
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
             [atproto.data :as data]
             [atproto.data.cbor :as cbor]
             [atproto.runtime.bytes :as bytes]
             [atproto.runtime.crypto :as runtime.crypto]
             [atproto.runtime.json :as json]
-            [atproto.repo.car :as car])
+            [atproto.repo.car :as car]
+            [atproto.repo.test-support.gen :as tgen])
   #?(:clj (:import [java.io ByteArrayInputStream ByteArrayOutputStream
                     PipedInputStream PipedOutputStream])))
 
-(defn- cbor-block
-  [value]
-  (let [bytes (cbor/encode value)]
-    {:cid (data/cid-link bytes) :bytes bytes}))
+(defn- blocks-match?
+  "Same cids and bytes, in the same order."
+  [expected actual]
+  (and (= (count expected) (count actual))
+       (every? true?
+               (map (fn [e a]
+                      (and (= (:cid e) (:cid a))
+                           (bytes/eq? (:bytes e) (:bytes a))))
+                    expected
+                    actual))))
+
+;; -----------------------------------------------------------------------------
+;; Interop fixtures (byte-exact, car.test.ts:23-61)
+;; -----------------------------------------------------------------------------
 
 #?(:clj
    (defn- load-fixtures
@@ -41,94 +59,110 @@
                                            (runtime.crypto/base64-decode (:car fixture)))]
              (is (nil? (:error read)))
              (is (= [(:root fixture)] (map data/format-cid roots)))
-             (is (= (count (:blocks fixture)) (count (:blocks read))))
-             (doseq [[expected actual] (map vector (:blocks fixture) (:blocks read))]
-               (is (= (:cid expected) (data/format-cid (:cid actual))))
-               (is (bytes/eq? (runtime.crypto/base64-decode (:bytes expected))
-                              (:bytes actual))))))))))
+             (is (blocks-match? blocks (:blocks read)))))))))
 
-(deftest test-read-car-with-root
-  (let [block (cbor-block {:test 1})
-        car-bytes (car/write-car (:cid block) [block])
-        {:keys [root block-map] :as read} (car/read-car-with-root car-bytes)]
-    (is (nil? (:error read)))
-    (is (= (:cid block) root))
-    (is (bytes/eq? (:bytes block) (get block-map (:cid block))))
-    ;; zero roots
-    (is (= "InvalidCar"
-           (:error (car/read-car-with-root (car/write-car nil [block])))))))
+;; -----------------------------------------------------------------------------
+;; Round-trip properties
+;; -----------------------------------------------------------------------------
 
-(deftest test-cid-verification
-  (let [blocks (mapv #(cbor-block {:block %}) (range 4))
-        bad-block (cbor-block {:block "bad"})
-        ;; last block claims block3's CID but carries bad-block's bytes
-        tampered (conj (pop blocks)
-                       {:cid (:cid (peek blocks)) :bytes (:bytes bad-block)})
-        car-bytes (car/write-car (:cid (first blocks)) tampered)]
-    (testing "verifies CIDs by default"
-      (let [res (car/read-car car-bytes)]
-        (is (= "InvalidCarBlock" (:error res)))
-        (is (= (:cid (peek blocks)) (:cid res)))))
-    (testing "skips CID verification"
-      (let [res (car/read-car car-bytes :skip-cid-verification? true)]
-        (is (nil? (:error res)))
-        (is (= 4 (count (:blocks res))))))))
+(defspec car-write-read-round-trips 100
+  (prop/for-all [blocks tgen/gen-cbor-blocks
+                 root? gen/boolean]
+    (let [root (when root? (:cid (first blocks)))
+          car-bytes (car/write-car root blocks)
+          read (car/read-car car-bytes)
+          with-root (car/read-car-with-root car-bytes)]
+      (and (nil? (:error read))
+           (= (if root [root] []) (:roots read))
+           (blocks-match? blocks (:blocks read))
+           ;; the block-map indexes the same content
+           (every? (fn [{:keys [cid bytes]}]
+                     (bytes/eq? bytes (get (:block-map read) cid)))
+                   blocks)
+           ;; read-car-with-root requires exactly one root
+           (if root
+             (and (nil? (:error with-root))
+                  (= root (:root with-root)))
+             (= "InvalidCar" (:error with-root)))))))
+
+(defspec car-tampered-blocks-are-detected 100
+  (prop/for-all [[blocks index replacement]
+                 (gen/let [blocks tgen/gen-cbor-blocks
+                           index (gen/choose 0 (dec (count blocks)))
+                           replacement (gen/such-that
+                                        #(not (bytes/eq? (:bytes %)
+                                                         (:bytes (nth blocks index))))
+                                        tgen/gen-cbor-block
+                                        100)]
+                   [blocks index replacement])]
+    (let [tampered (assoc blocks index
+                          {:cid (:cid (nth blocks index))
+                           :bytes (:bytes replacement)})
+          car-bytes (car/write-car (:cid (first blocks)) tampered)
+          checked (car/read-car car-bytes)
+          unchecked (car/read-car car-bytes :skip-cid-verification? true)]
+      (and (= "InvalidCarBlock" (:error checked))
+           (= (:cid (nth blocks index)) (:cid checked))
+           (nil? (:error unchecked))
+           (= (count blocks) (count (:blocks unchecked)))
+           ;; the JVM streaming reader rejects the same tampered block
+           #?(:clj (= "InvalidCarBlock"
+                      (try
+                        (into [] (:blocks (car/block-reader
+                                           (ByteArrayInputStream. car-bytes))))
+                        nil
+                        (catch Exception e (:error (ex-data e)))))
+              :cljs true)))))
+
+(defspec car-truncation-never-yields-garbage 100
+  (prop/for-all [[blocks cut]
+                 (gen/let [blocks tgen/gen-cbor-blocks
+                           car-len (gen/return (bytes/length
+                                                (car/write-car (:cid (first blocks))
+                                                               blocks)))
+                           cut (gen/choose 0 (dec car-len))]
+                   [blocks cut])]
+    (let [car-bytes (car/write-car (:cid (first blocks)) blocks)
+          read (car/read-car (bytes/slice car-bytes 0 cut))]
+      (or
+       ;; either a clean framing error...
+       (= "InvalidCar" (:error read))
+       ;; ...or the cut fell on a block boundary and we got a valid prefix
+       (and (nil? (:error read))
+            (blocks-match? (take (count (:blocks read)) blocks)
+                           (:blocks read)))))))
 
 (deftest test-framing-errors
-  (let [block (cbor-block {:test 1})
-        car-bytes (car/write-car (:cid block) [block])
-        len (bytes/length car-bytes)]
-    (testing "empty input"
-      (is (= "InvalidCar" (:error (car/read-car (bytes/slice car-bytes 0 0))))))
-    (testing "truncated header"
-      (is (= "InvalidCar" (:error (car/read-car (bytes/slice car-bytes 0 3))))))
-    (testing "truncated block"
-      (is (= "InvalidCar" (:error (car/read-car (bytes/slice car-bytes 0 (dec len)))))))
-    (testing "garbage header"
-      (is (= "InvalidCar"
-             (:error (car/read-car (bytes/utf8-bytes "junks"))))))))
+  (testing "garbage header"
+    (is (= "InvalidCar"
+           (:error (car/read-car (bytes/utf8-bytes "junks")))))))
 
 ;; -----------------------------------------------------------------------------
 ;; JVM streaming
 ;; -----------------------------------------------------------------------------
 
 #?(:clj
-   (deftest test-write-car-stream
-     (let [blocks (mapv #(cbor-block {:block %}) (range 10))
-           root (:cid (first blocks))
-           out (ByteArrayOutputStream.)]
-       (car/write-car-stream root blocks out)
-       (is (bytes/eq? (car/write-car root blocks) (.toByteArray out))))))
-
-#?(:clj
-   (deftest test-block-reader
-     (let [blocks (mapv #(cbor-block {:block %}) (range 100))
-           root (:cid (first blocks))
-           car-bytes (car/write-car root blocks)
-           {:keys [roots] :as reader} (car/block-reader (ByteArrayInputStream. car-bytes))]
-       (is (= [root] roots))
-       (let [read (into [] (:blocks reader))]
-         (is (= (map :cid blocks) (map :cid read)))
-         (is (every? true? (map #(bytes/eq? (:bytes %1) (:bytes %2)) blocks read)))))))
-
-#?(:clj
-   (deftest test-block-reader-detects-corruption
-     (let [good (cbor-block {:block 1})
-           bad {:cid (:cid (cbor-block {:block 2})) :bytes (:bytes good)}
-           car-bytes (car/write-car (:cid good) [good bad])
-           reader (car/block-reader (ByteArrayInputStream. car-bytes))]
-       (is (= "InvalidCarBlock"
-              (try
-                (into [] (:blocks reader))
-                nil
-                (catch Exception e (:error (ex-data e)))))))))
+   (defspec car-streaming-matches-in-memory 50
+     (prop/for-all [blocks tgen/gen-cbor-blocks]
+       (let [root (:cid (first blocks))
+             car-bytes (car/write-car root blocks)
+             out (ByteArrayOutputStream.)
+             _ (car/write-car-stream root blocks out)
+             reader (car/block-reader (ByteArrayInputStream. car-bytes))]
+         (and ;; the streaming writer produces identical bytes
+          (bytes/eq? car-bytes (.toByteArray out))
+          ;; the streaming reader agrees with the in-memory reader
+          (= [root] (:roots reader))
+          (blocks-match? blocks (into [] (:blocks reader))))))))
 
 #?(:clj
    (deftest test-block-reader-streams-bounded
      ;; 50k blocks streamed from a pipe: the writer thread produces the CAR
      ;; incrementally and the reader consumes it without materializing it.
      (let [n 50000
-           block-for (fn [i] (cbor-block {:block i}))
+           block-for (fn [i]
+                       (let [bytes (cbor/encode {:block i})]
+                         {:cid (data/cid-link bytes) :bytes bytes}))
            in (PipedInputStream. (* 64 1024))
            out (PipedOutputStream. in)
            writer (future
