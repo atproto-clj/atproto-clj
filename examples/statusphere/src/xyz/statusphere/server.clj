@@ -81,7 +81,10 @@
 (defn handler
   [config]
   (let [oauth-client (auth/client config)
-        xrpc-server (xrpc/init {:lexicon (lexicon/load-resources! "lexicons")
+        ;; "statusphere-lexicons" rather than "lexicons": the SDK bundles its
+        ;; own manifest-driven lexicons/ resource tree on the classpath, which
+        ;; would shadow this app's schemas.
+        xrpc-server (xrpc/init {:lexicon (lexicon/load-resources! "statusphere-lexicons")
                                 :validate-response? true})]
     (-> (app xrpc-server)
         (wrap-atproto-client)

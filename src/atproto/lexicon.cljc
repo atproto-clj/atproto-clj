@@ -7,6 +7,7 @@
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
             #?(:clj [clojure.java.io :as io])
+            #?(:clj [clojure.edn :as edn])
             [atproto.data :as data]
             [atproto.lexicon.regex :as regex]
             [atproto.runtime.string :refer [utf8-length grapheme-length]]
@@ -37,6 +38,8 @@
             [atproto.lexicon.schema.type.union        :as-alias union]
             [atproto.lexicon.schema.type.unknown      :as-alias unkown]
             [atproto.lexicon.schema.type.record       :as-alias record]
+            [atproto.lexicon.schema.type.permission     :as-alias permission]
+            [atproto.lexicon.schema.type.permission-set :as-alias permission-set]
             [atproto.lexicon.schema.type.query        :as-alias query]
             [atproto.lexicon.schema.type.procedure    :as-alias procedure]
             [atproto.lexicon.schema.type.subscription :as-alias subscription]))
@@ -392,6 +395,20 @@
                                       (re-matches #"^literal:(.+)$" k))]
                       (or value ::s/invalid))))))
 
+(defmethod primary-type-spec "permission-set" [_]
+  (s/keys :req-un [::permission-set/permissions]))
+
+(s/def ::permission-set/permissions
+  (s/coll-of ::schema/permission))
+
+;; OAuth permission declarations (granular auth scopes); they describe
+;; resource access, not data/XRPC shapes.
+(s/def ::schema/permission
+  (s/and (s/keys :req-un [::permission/resource])
+         #(= "permission" (:type %))))
+
+(s/def ::permission/resource string?)
+
 (defmethod primary-type-spec "query" [_]
   (s/keys :opt-un [::query/parameters
                    ::query/output
@@ -526,6 +543,12 @@
   (add-spec ctx (if output
                   `(s/keys :req-un ~(add-body-specs ctx output))
                   'any?)))
+
+(defmethod translate-primary-type-def "permission-set"
+  [ctx def]
+  ;; permission sets declare OAuth scopes, not data/XRPC shapes;
+  ;; nothing to validate at runtime
+  nil)
 
 (defmethod translate-primary-type-def "query"
   [ctx def]
@@ -946,6 +969,12 @@
   ;; validated without an rkey in hand); see record-key-spec.
   {(spec-key ctx) (compile-field-type ctx record)})
 
+(defmethod compile-primary-type "permission-set"
+  [ctx def]
+  ;; permission sets declare OAuth scopes, not data/XRPC shapes;
+  ;; nothing to validate at runtime
+  {})
+
 (defn- compile-request
   [ctx {:keys [parameters input]}]
   (if (or parameters input)
@@ -1080,14 +1109,29 @@
 
 #?(:clj
    (defn load-resources!
-     "Load the Lexicon schemas at the resource path and return a Lexicon."
+     "Load the Lexicon schemas at the resource path and return a Lexicon.
+
+     Jar-safe: when a manifest.edn is present at the resource path (see
+     resources/lexicons/manifest.edn), its :files list drives loading via
+     io/resource. Falls back to walking the directory tree on disk for dev
+     trees without a manifest (which only works for exploded directories)."
      [resource-path]
-     (->> (io/resource resource-path)
-          (io/file)
-          (file-seq)
-          (filter #(str/ends-with? (.getName %) ".json"))
-          (map #(json/read-str (slurp %)))
-          lexicon)))
+     (if-let [manifest-resource (io/resource (str resource-path "/manifest.edn"))]
+       (->> (:files (edn/read-string (slurp manifest-resource)))
+            (map (fn [file]
+                   (let [path (str resource-path "/" file)]
+                     (if-let [resource (io/resource path)]
+                       (json/read-str (slurp resource))
+                       (throw (ex-info (str "Lexicon resource listed in the manifest"
+                                            " was not found: " path)
+                                       {:path path}))))))
+            lexicon)
+       (->> (io/resource resource-path)
+            (io/file)
+            (file-seq)
+            (filter #(str/ends-with? (.getName ^java.io.File %) ".json"))
+            (map #(json/read-str (slurp %)))
+            lexicon))))
 
 (defn register-specs!
   "Register validators for every schema in this Lexicon.
