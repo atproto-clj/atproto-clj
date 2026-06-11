@@ -398,6 +398,88 @@
   [spec-key]
   (or (lexicon/registered-validator spec-key) spec-key))
 
+(defn- record-schema
+  [id key]
+  {:lexicon 1
+   :id id
+   :defs {:main {:type "record"
+                 :key key
+                 :record {:type "object"
+                          :properties {:text {:type "string"}}}}}})
+
+(deftest test-record-key-validation
+  (lexicon/register-specs!
+   (lexicon/lexicon [(record-schema "com.example.tidKeyed" "tid")
+                     (record-schema "com.example.nsidKeyed" "nsid")
+                     (record-schema "com.example.selfKeyed" "literal:self")
+                     (record-schema "com.example.anyKeyed" "any")
+                     {:lexicon 1
+                      :id "com.example.notARecord"
+                      :defs {:main {:type "query"}}}]))
+  (testing "tid keys"
+    (doseq [rkey (interop-test-cases "syntax/tid_syntax_valid.txt")]
+      (is (true? (lexicon/valid-record-key? "com.example.tidKeyed" rkey))
+          (str rkey " is a valid tid record key")))
+    (doseq [rkey (interop-test-cases "syntax/tid_syntax_invalid.txt")]
+      (is (false? (lexicon/valid-record-key? "com.example.tidKeyed" rkey))
+          (str rkey " is not a valid tid record key"))))
+  (testing "nsid keys"
+    (doseq [rkey (interop-test-cases "syntax/nsid_syntax_valid.txt")]
+      (is (true? (lexicon/valid-record-key? "com.example.nsidKeyed" rkey))
+          (str rkey " is a valid nsid record key")))
+    (doseq [rkey (interop-test-cases "syntax/nsid_syntax_invalid.txt")]
+      (is (false? (lexicon/valid-record-key? "com.example.nsidKeyed" rkey))
+          (str rkey " is not a valid nsid record key"))))
+  (testing "literal keys"
+    (is (true? (lexicon/valid-record-key? "com.example.selfKeyed" "self")))
+    (is (false? (lexicon/valid-record-key? "com.example.selfKeyed" "other")))
+    (is (false? (lexicon/valid-record-key? "com.example.selfKeyed" "literal:self"))))
+  (testing "any keys"
+    (doseq [rkey (interop-test-cases "syntax/recordkey_syntax_valid.txt")]
+      (is (true? (lexicon/valid-record-key? "com.example.anyKeyed" rkey))
+          (str rkey " is a valid record key")))
+    (doseq [rkey (interop-test-cases "syntax/recordkey_syntax_invalid.txt")]
+      (is (false? (lexicon/valid-record-key? "com.example.anyKeyed" rkey))
+          (str rkey " is not a valid record key"))))
+  (testing "unknown or non-record collections"
+    (is (= "UnknownCollection"
+           (:error (lexicon/valid-record-key? "com.example.unregistered" "abc"))))
+    (is (= "UnknownCollection"
+           (:error (lexicon/valid-record-key? "com.example.notARecord" "abc"))))
+    (is (nil? (lexicon/record-key-spec "com.example.unregistered")))
+    (is (nil? (lexicon/record-key-spec "com.example.notARecord")))))
+
+(deftest test-union-ref-check
+  (testing "a union ref targeting a non-object def in the set throws"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo)
+                 (lexicon/lexicon
+                  [{:lexicon 1
+                    :id "com.example.unionBad"
+                    :defs {:name {:type "string"}
+                           :main {:type "object"
+                                  :properties {:value {:type "union"
+                                                       :refs ["#name"]}}}}}]))))
+  (testing "a union ref targeting a non-object def in another schema of the set throws"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs ExceptionInfo)
+                 (lexicon/lexicon
+                  [{:lexicon 1
+                    :id "com.example.unionBad"
+                    :defs {:main {:type "object"
+                                  :properties {:value {:type "union"
+                                                       :refs ["com.example.other#name"]}}}}}
+                   {:lexicon 1
+                    :id "com.example.other"
+                    :defs {:name {:type "string"}}}]))))
+  (testing "union refs to object defs and to absent schemas are fine"
+    (is (map? (lexicon/lexicon
+               [{:lexicon 1
+                 :id "com.example.unionGood"
+                 :defs {:thing {:type "object" :properties {}}
+                        :main {:type "object"
+                               :properties {:value {:type "union"
+                                                    :refs ["#thing"
+                                                           "com.example.absent#thing"]}}}}}])))))
+
 (def modes-schema
   {:lexicon 1
    :id "com.example.modes"

@@ -41,9 +41,6 @@
             [atproto.lexicon.schema.type.procedure    :as-alias procedure]
             [atproto.lexicon.schema.type.subscription :as-alias subscription]))
 
-;; todo:
-;; - validate that the refs pointed to by `union` in the schema have `type=object`.
-
 ;; -----------------------------------------------------------------------------
 ;; String Formats: https://atproto.com/specs/lexicon#string-formats
 ;; -----------------------------------------------------------------------------
@@ -388,9 +385,12 @@
 (s/def ::record/key
   (s/or :tid     #{"tid"}
         :nsid    #{"nsid"}
-        :literal #(let [[_ value] (re-matches #"literal:(.+)$" %)]
-                    (or value ::s/invalid))
-        :any     #{"any"}))
+        :any     #{"any"}
+        :literal (s/conformer
+                  (fn [k]
+                    (let [[_ value] (when (string? k)
+                                      (re-matches #"^literal:(.+)$" k))]
+                      (or value ::s/invalid))))))
 
 (defmethod primary-type-spec "query" [_]
   (s/keys :opt-un [::query/parameters
@@ -481,17 +481,17 @@
     @(:defs ctx)))
 
 (defn- rkey-type->spec
-  "The spec form for this record key type."
+  "The spec for this conformed record key type."
   [[rkey-type rkey-value]]
   (case rkey-type
     :tid     ::tid
     :nsid    ::nsid
-    :literal `#{~rkey-value}
+    :literal #{rkey-value}
     :any     ::record-key))
 
 (defmethod translate-primary-type-def "record"
   [ctx {:keys [key record]}]
-  ;; ignore the record key in the validation (for now)
+  ;; the record key is validated separately (see record-key-spec)
   (add-spec ctx (field-type-def->spec ctx record)))
 
 (defn- add-params-spec
@@ -1024,20 +1024,59 @@
 ;; Loading
 ;; -----------------------------------------------------------------------------
 
+(defn- check-union-refs!
+  "Verify that every union ref that resolves within this lexicon points to an
+  object type definition.
+
+  Throws ex-info when an in-set ref targets a non-object def; refs to
+  schemas outside the lexicon are tolerated (open world) and reported with
+  cast/dev."
+  [lexicon]
+  (doseq [[nsid schema] lexicon
+          union (->> (tree-seq #(or (map? %) (sequential? %))
+                               #(if (map? %) (vals %) (seq %))
+                               schema)
+                     (filter #(and (map? %)
+                                   (= "union" (:type %))
+                                   (coll? (:refs %)))))
+          ref (:refs union)
+          :when (string? ref)]
+    (let [uri (normalize-lex-uri (if (str/starts-with? ref "#")
+                                   (str nsid ref)
+                                   ref))
+          [target-nsid type-name] (str/split uri #"#")
+          target (get-in lexicon [target-nsid :defs (keyword (or type-name "main"))])]
+      (cond
+        (nil? target)
+        (cast/dev {:message (str "Union ref does not resolve within this Lexicon: " ref)
+                   :nsid nsid
+                   :ref ref})
+
+        (not= "object" (:type target))
+        (throw (ex-info (str "Union refs must point to object type definitions: " ref
+                             " (in " nsid ") resolves to type " (:type target) ".")
+                        {:nsid nsid
+                         :ref ref
+                         :target-type (:type target)}))))))
+
 (defn lexicon
   "Create a new Lexicon with the given schemas.
 
-  A lexicon is a map: nsid -> schema."
+  A lexicon is a map: nsid -> schema. Throws if a schema is invalid or if a
+  union ref resolving within the schema set targets a non-object type
+  definition."
   [schemas]
-  (reduce (fn [lexicon schema]
-            (if (s/valid? ::schema/file schema)
-              (do
-                (cast/event {:message (str "Adding schema to Lexicon: " (:id schema))})
-                (assoc lexicon (:id schema) schema))
-              (throw (ex-info (s/explain-str ::schema/file schema)
-                              (s/explain-data ::schema/file schema)))))
-          {}
-          schemas))
+  (let [lexicon (reduce (fn [lexicon schema]
+                          (if (s/valid? ::schema/file schema)
+                            (do
+                              (cast/event {:message (str "Adding schema to Lexicon: " (:id schema))})
+                              (assoc lexicon (:id schema) schema))
+                            (throw (ex-info (s/explain-str ::schema/file schema)
+                                            (s/explain-data ::schema/file schema)))))
+                        {}
+                        schemas)]
+    (check-union-refs! lexicon)
+    lexicon))
 
 #?(:clj
    (defn load-resources!
@@ -1094,6 +1133,29 @@
 
 (s/def ::record
   (s/multi-spec record-spec identity))
+
+(defn record-key-spec
+  "Spec/predicate for record keys of the given collection NSID, derived from
+  the registered schema's key type (tid|nsid|literal:x|any). nil if the NSID
+  is not a registered record type."
+  [nsid]
+  (when-let [main (get-in (registered-schema nsid) [:defs :main])]
+    (when (= "record" (:type main))
+      (let [conformed (s/conform ::record/key (:key main))]
+        (when-not (= ::s/invalid conformed)
+          (rkey-type->spec conformed))))))
+
+(defn valid-record-key?
+  "Whether rkey satisfies the registered record-key constraint for this
+  collection NSID.
+
+  Returns {:error \"UnknownCollection\" ...} if the collection is not a
+  registered record type, else a boolean."
+  [nsid rkey]
+  (if-let [spec (record-key-spec nsid)]
+    (s/valid? spec rkey)
+    {:error "UnknownCollection"
+     :message (str "No record schema registered for collection: " nsid)}))
 
 (s/def ::request
   (s/keys :opt-un [::params ::body ::encoding]))
