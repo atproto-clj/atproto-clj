@@ -14,6 +14,7 @@
   (:require #?@(:clj [[clojure.test :refer :all]
                       [clojure.java.io :as io]]
                 :cljs [[cljs.test :refer :all]])
+            [clojure.string :as str]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -62,6 +63,16 @@
   [a b]
   #?(:clj (byte-array (concat (seq a) (seq b)))
      :cljs (js/Int8Array.from (concat (array-seq a) (array-seq b)))))
+
+(defn- blen
+  [b]
+  #?(:clj (alength ^bytes b)
+     :cljs (.-length b)))
+
+(defn- slice-bytes
+  [b start end]
+  #?(:clj (byte-array (->> (seq b) (drop start) (take (- end start))))
+     :cljs (.slice b start end)))
 
 (defn- invalid-cbor?
   "Whether decoding the hex throws an InvalidCbor error."
@@ -302,7 +313,11 @@
   (testing "decode does not enforce sorted map keys"
     ;; {"aa" 2, "b" 1} in non-canonical key order
     (is (= {:aa 2 :b 1}
-           (cbor/decode (hex->bytes "a262616102616201"))))))
+           (cbor/decode (hex->bytes "a262616102616201")))))
+
+  (testing "slash as map key round-trips (TS parity; :/ is unqualified)"
+    (let [v {(keyword "/") true}]
+      (is (= v (cbor/decode (cbor/encode v)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; decode-first / decode-multi
@@ -355,12 +370,24 @@
   (gen/fmap #(data/cid-link #?(:clj (byte-array %) :cljs (js/Int8Array.from %)))
             (gen/vector (gen/choose -128 127) 1 32)))
 
+(def multibyte-fragments
+  "UTF-8 torture fragments: 2/3/4-byte sequences, astral-plane characters,
+  combining marks, and a multi-codepoint grapheme cluster (emoji ZWJ)."
+  ["é" "ñ" "©" "⽘" "☎" "𓋓" "😀" "👨‍👩‍👧‍👧" "中文" "العربية" "𝒜" "ﬃ" "é"])
+
+(def gen-unicode-string
+  (gen/fmap str/join
+            (gen/vector (gen/one-of [(gen/fmap str gen/char-ascii)
+                                     (gen/elements multibyte-fragments)])
+                        0 20)))
+
 (def gen-scalar
   (gen/one-of [(gen/return nil)
                gen/boolean
                gen/int
                (gen/choose -9007199254740991 9007199254740991)
                gen/string
+               gen-unicode-string
                gen-bytes
                gen-cid]))
 
@@ -383,3 +410,121 @@
     (let [encoded (cbor/encode v)]
       (= (bytes->hex encoded)
          (bytes->hex (cbor/encode (cbor/decode encoded)))))))
+
+;; -----------------------------------------------------------------------------
+;; Insertion-order insensitivity (canonical key sort)
+;; -----------------------------------------------------------------------------
+
+(defn- array-map-of
+  "Build an array-map (which preserves insertion order) from [k v] entries."
+  [entries]
+  (apply array-map (mapcat identity entries)))
+
+(def gen-map-with-permutation
+  (gen/bind (gen/map gen-key gen-scalar)
+            (fn [m]
+              (gen/fmap (fn [perm] [(vec m) perm])
+                        (gen/shuffle (vec m))))))
+
+(defspec map-insertion-order-insensitivity 100
+  (prop/for-all [[entries perm] gen-map-with-permutation]
+    (= (bytes->hex (cbor/encode (array-map-of entries)))
+       (bytes->hex (cbor/encode (array-map-of perm))))))
+
+;; -----------------------------------------------------------------------------
+;; CID determinism (the property MST/commit code depends on)
+;; -----------------------------------------------------------------------------
+
+(defspec cid-for-determinism 100
+  (prop/for-all [v gen-value]
+    (= (data/format-cid (data/cid-for v))
+       (data/format-cid (data/cid-for (cbor/decode (cbor/encode v)))))))
+
+;; -----------------------------------------------------------------------------
+;; decode-first / decode-multi composition
+;; -----------------------------------------------------------------------------
+
+(defspec decode-multi-matches-folded-decode-first 50
+  (prop/for-all [vs (gen/vector gen-value 1 5)]
+    (let [encs (mapv cbor/encode vs)
+          buf (reduce concat-bytes encs)
+          multi (cbor/decode-multi buf)
+          [firsts lens] (loop [b buf
+                               firsts []
+                               lens []]
+                          (if (zero? (blen b))
+                            [firsts lens]
+                            (let [[v n] (cbor/decode-first b)]
+                              (recur (slice-bytes b n (blen b))
+                                     (conj firsts v)
+                                     (conj lens n)))))]
+      (and (= (count vs) (count multi) (count firsts))
+           (every? true? (map data/eq? vs multi))
+           (every? true? (map data/eq? vs firsts))
+           ;; decode-first consumes exactly the per-item encoded lengths
+           (= (mapv blen encs) lens)))))
+
+;; -----------------------------------------------------------------------------
+;; Every strict prefix of a valid item fails to decode
+;; -----------------------------------------------------------------------------
+
+(def gen-encoded-with-prefix-length
+  (gen/bind gen-value
+            (fn [v]
+              (let [b (cbor/encode v)]
+                (gen/fmap (fn [i] [b i])
+                          (gen/choose 0 (dec (blen b))))))))
+
+(defspec strict-prefix-always-throws 100
+  (prop/for-all [[b i] gen-encoded-with-prefix-length]
+    (try
+      (cbor/decode (slice-bytes b 0 i))
+      false
+      (catch #?(:clj Exception :cljs js/Error) e
+        (= "InvalidCbor" (:error (ex-data e)))))))
+
+;; -----------------------------------------------------------------------------
+;; Garbage fuzzing: decode is total — InvalidCbor or a normalizable value,
+;; never an unexpected exception
+;; -----------------------------------------------------------------------------
+
+(def gen-garbage
+  (gen/fmap #(#?(:clj byte-array :cljs js/Int8Array.from) %)
+            (gen/vector (gen/choose -128 127) 1 100)))
+
+(defspec garbage-decode-is-total 200
+  (prop/for-all [b gen-garbage]
+    (try
+      (let [v (cbor/decode b)]
+        ;; rare: random bytes happened to be valid CBOR; the value must
+        ;; normalize cleanly...
+        (try
+          (true? (data/eq? v (cbor/decode (cbor/encode v))))
+          (catch #?(:clj Exception :cljs js/Error) e
+            ;; ...except that decode accepts the full int64 range on the
+            ;; JVM while encode enforces the JS-safe range
+            (= "InvalidDataModel" (:error (ex-data e))))))
+      (catch #?(:clj Exception :cljs js/Error) e
+        (= "InvalidCbor" (:error (ex-data e)))))))
+
+;; -----------------------------------------------------------------------------
+;; UTF-8 torture: multi-byte strings as values and as map keys, where the
+;; byte-length-vs-char-length distinction matters for the canonical key sort
+;; -----------------------------------------------------------------------------
+
+(defspec unicode-string-round-trip 100
+  (prop/for-all [s gen-unicode-string]
+    (= s (cbor/decode (cbor/encode s)))))
+
+(def gen-unicode-key
+  ;; "/" is excluded: (keyword "a/b") is a *qualified* keyword, which is
+  ;; outside the atproto data model (::data/key) and rejected by encode.
+  (gen/fmap #(keyword (str/replace % "/" "_"))
+            (gen/not-empty gen-unicode-string)))
+
+(defspec unicode-map-keys-canonical-round-trip 100
+  (prop/for-all [m (gen/map gen-unicode-key gen/int)]
+    (let [encoded (cbor/encode m)]
+      (and (true? (data/eq? m (cbor/decode encoded)))
+           (= (bytes->hex encoded)
+              (bytes->hex (cbor/encode (cbor/decode encoded))))))))
