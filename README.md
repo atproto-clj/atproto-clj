@@ -17,7 +17,7 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | Identifier Syntax   | 🟢 | 🟢 | 🟢 |
 | **Protocol + Data** | | | |
 | Keys and Crypto     | 🟢 | ⭕ | ⭕ |
-| MST and Repo        | ⭕ | ⭕ | ⭕ |
+| MST and Repo        | 🟢 | ⭕ | ⭕ |
 | Data model          | 🟡 (no CBOR) | 🟡 (no CBOR) | ❓ |
 | Lex Validation      | 🟢 | 🟢 | ❓ |
 | Identity Resolution | 🟢 | 🟢 | ❓ |
