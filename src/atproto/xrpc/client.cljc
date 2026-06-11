@@ -6,29 +6,106 @@
             [atproto.runtime.json :as json]
             [atproto.runtime.interceptor :as i]
             [atproto.runtime.cast :as cast]
+            [atproto.runtime.retry :as retry]
             [atproto.data.json :as atproto-json]
+            [atproto.xrpc.error :as xrpc-error]
             [atproto.lexicon :as lexicon]))
 
 ;; TODO:
 ;; - return error for unkown params when validating request?
 ;; - should we only serialize known parameters if lexicon loaded?
-;; - productionize (error handling, timeout, retry...)
-;; - pagination w/ cursor
-;; - consider bubbling up server error in the response map
+
+(def ^:private service-proxy-regex
+  ;; "<did>#<service-identifier>", e.g. "did:web:api.bsky.app#bsky_appview"
+  #"^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]#[a-zA-Z0-9_]+$")
+
+(s/def ::service-proxy
+  (s/and string? #(re-matches service-proxy-regex %)))
 
 (defn init
   "Initialize a new XRPC client and return it.
 
-  config keys: :service, :session, :validate-requests?. The returned client
-  also carries ::refresh-state (atom) used to single-flight token refreshes.
-  Throws if neither :service nor :session is provided."
-  [{:keys [service session validate-requests?] :as config}]
-  (if (and (not service) (not session))
+  config keys:
+  :service            Base URL of the XRPC service.
+  :session            Session to authenticate requests with.
+  :validate-requests? Validate requests against their lexicon before sending.
+  :headers            Map of default headers for every request (lowercase
+                      keyword keys).
+  :service-proxy      \"<did>#<service-id>\" emitted as the atproto-proxy
+                      header (a per-request atproto-proxy header wins).
+  :labelers           Coll of labeler DIDs, or {:did ... :redact? true} maps,
+                      emitted as the atproto-accept-labelers header.
+  :timeout            Default per-request timeout in ms.
+  :max-retries        Default retry count for retryable errors (default 0 = off).
+
+  The returned client also carries ::refresh-state (atom) used to
+  single-flight token refreshes. Throws if neither :service nor :session is
+  provided, or if :service-proxy is malformed."
+  [{:keys [service session validate-requests?
+           headers service-proxy labelers timeout max-retries] :as config}]
+  (cond
+    (and (not service) (not session))
     (throw (ex-info "A service or a session is required." config))
-    {:service (or service (:pds session))
-     :session (when session (atom session))
-     :validate-requests? (boolean validate-requests?)
-     ::refresh-state (atom nil)}))
+
+    (and service-proxy (not (s/valid? ::service-proxy service-proxy)))
+    (throw (ex-info "Invalid :service-proxy; expected \"<did>#<service-id>\"."
+                    {:service-proxy service-proxy}))
+
+    :else
+    (cond-> {:service (or service (:pds session))
+             :session (when session (atom session))
+             :validate-requests? (boolean validate-requests?)
+             ::refresh-state (atom nil)}
+      headers       (assoc :headers headers)
+      service-proxy (assoc :service-proxy service-proxy)
+      labelers      (assoc :labelers labelers)
+      timeout       (assoc :timeout timeout)
+      max-retries   (assoc :max-retries max-retries))))
+
+(defn with-service-proxy
+  "Return a client that routes requests via the given service, e.g.
+  \"did:web:api.bsky.app#bsky_appview\" (emitted as the atproto-proxy header)."
+  [client service]
+  (if (s/valid? ::service-proxy service)
+    (assoc client :service-proxy service)
+    (throw (ex-info "Invalid :service-proxy; expected \"<did>#<service-id>\"."
+                    {:service-proxy service}))))
+
+(defn with-labelers
+  "Return a client that sends the given labelers (a coll of labeler DIDs, or
+  {:did ... :redact? true} maps) as the atproto-accept-labelers header."
+  [client labelers]
+  (assoc client :labelers labelers))
+
+(defn- labelers-header-value
+  [labelers]
+  (->> labelers
+       (map (fn [labeler]
+              (if (map? labeler)
+                (str (:did labeler) (when (:redact? labeler) ";redact"))
+                labeler)))
+       (str/join ", ")))
+
+(defn- merged-headers
+  "Merge the headers for an outgoing request.
+
+  Precedence: client defaults < proxy/labelers < per-request headers <
+  computed headers. The atproto-proxy header is only set from the client when
+  absent per-request; atproto-accept-labelers merges the client's labelers
+  with any per-request value."
+  [{:keys [headers service-proxy labelers]} request-headers computed-headers]
+  (let [merged (merge headers request-headers)
+        merged (if (and service-proxy (not (:atproto-proxy merged)))
+                 (assoc merged :atproto-proxy service-proxy)
+                 merged)
+        merged (if (seq labelers)
+                 (assoc merged :atproto-accept-labelers
+                        (->> [(labelers-header-value labelers)
+                              (some-> (:atproto-accept-labelers merged) str/trim)]
+                             (remove str/blank?)
+                             (str/join ", ")))
+                 merged)]
+    (merge merged computed-headers)))
 
 (defn request-validator
   [{:keys [validate-requests?]}]
@@ -37,8 +114,8 @@
                (let [spec (binding [lexicon/*schema-validate* validate-requests?]
                             (lexicon/request-spec-key (:nsid request)))]
                  (if (not (s/valid? spec request))
-                   (throw (ex-info "Invalid Request"
-                                   {:explain-data (s/explain-data spec request)}))
+                   (assoc ctx ::i/response (xrpc-error/invalid-request
+                                            (s/explain-data spec request)))
                    ctx)))})
 
 (defprotocol Session
@@ -179,43 +256,65 @@
           {}
           params))
 
+(defn- with-headers-meta
+  "Attach the response headers as ::headers metadata when the body supports
+  metadata (maps/collections); other bodies are returned untouched."
+  [body headers]
+  (if #?(:clj (instance? clojure.lang.IObj body)
+         :cljs (implements? IWithMeta body))
+    (vary-meta body assoc ::headers headers)
+    body))
+
+(defn response-headers
+  "The HTTP response headers of a successful XRPC call, read from the
+  body's metadata (nil for bodies that do not support metadata)."
+  [body]
+  (::headers (meta body)))
+
 (defn- handle-xrpc-response
-  [{:keys [error status body] :as http-response}]
+  [{:keys [error status headers body] :as http-response}]
   (cond
-    error                  http-response
-    (http/success? status) (:body http-response)
-    (:error body)          (:body http-response)
-    :else                  (http/error-map http-response)))
+    ;; transport-level failures are retryable; other error maps reaching the
+    ;; leave chain (auth refresh failures, Aborted) pass through unchanged
+    error                  (case error
+                             ("HTTPClientError" "Timeout") (xrpc-error/network-error http-response)
+                             http-response)
+    (http/success? status) (with-headers-meta body headers)
+    :else                  (xrpc-error/http-error http-response)))
 
 (defn- procedure-interceptor
   [client]
   {::i/name ::procedure
-   ::i/enter (fn [ctx]
-               (update ctx
-                       ::i/request
-                       (fn [{:keys [nsid params encoding body] :as request}]
-                         (let [encoding (or encoding
-                                            (when (coll? body) "application/json"))]
-                           (when (and body (not encoding))
-                             (throw (ex-info "Missing encoding" request)))
-                           (cond-> {:method :post
-                                    :url (url client nsid)}
-                             params (assoc :query-params (xrpc-params->query-params params))
-                             body (assoc :body body
-                                         :headers {:content-type encoding}))))))
+   ::i/enter (fn [{:keys [::i/request] :as ctx}]
+               (let [{:keys [nsid params encoding body headers]} request
+                     encoding (or encoding
+                                  (when (coll? body) "application/json"))]
+                 (cond
+                   (and body (not encoding))
+                   (assoc ctx ::i/response
+                          {:error "InvalidRequest"
+                           :message "Missing :encoding for the request body."
+                           :retryable? false})
+
+                   (and body (:content-type headers))
+                   (assoc ctx ::i/response
+                          {:error "InvalidRequest"
+                           :message "Do not set a content-type header; use :encoding to specify the body MIME type."
+                           :retryable? false})
+
+                   :else
+                   (assoc ctx ::i/request
+                          (let [request-headers (merged-headers client
+                                                                headers
+                                                                (when body
+                                                                  {:content-type encoding}))]
+                            (cond-> {:method :post
+                                     :url (url client nsid)}
+                              (seq request-headers) (assoc :headers request-headers)
+                              params (assoc :query-params (xrpc-params->query-params params))
+                              body (assoc :body body)))))))
    ::i/leave (fn [ctx]
                (update ctx ::i/response handle-xrpc-response))})
-
-(defn procedure
-  [{:keys [session] :as client} request & {:as opts}]
-  (i/execute {::i/request request
-              ::i/queue [(request-validator client)
-                         (procedure-interceptor client)
-                         (delegate-auth-interceptor client)
-                         atproto-json/client-interceptor
-                         json/client-interceptor
-                         http/client-interceptor]}
-             opts))
 
 (defn- query-interceptor
   [client]
@@ -223,20 +322,31 @@
    ::i/enter (fn [ctx]
                (update ctx
                        ::i/request
-                       (fn [{:keys [nsid params]}]
-                         (cond-> {:method :get
-                                  :url (url client nsid)}
-                           params (assoc :query-params (xrpc-params->query-params params))))))
+                       (fn [{:keys [nsid params headers]}]
+                         (let [request-headers (merged-headers client headers nil)]
+                           (cond-> {:method :get
+                                    :url (url client nsid)}
+                             (seq request-headers) (assoc :headers request-headers)
+                             params (assoc :query-params (xrpc-params->query-params params)))))))
    ::i/leave (fn [ctx]
                (update ctx ::i/response handle-xrpc-response))})
 
-(defn query
-  [{:keys [session] :as client} request & {:as opts}]
+(defn- execute-xrpc
+  "Execute the XRPC interceptor chain for the request."
+  [client xrpc-interceptor request opts]
   (i/execute {::i/request request
               ::i/queue [(request-validator client)
-                         (query-interceptor client)
+                         xrpc-interceptor
                          (delegate-auth-interceptor client)
                          atproto-json/client-interceptor
                          json/client-interceptor
                          http/client-interceptor]}
              opts))
+
+(defn procedure
+  [client request & {:as opts}]
+  (execute-xrpc client (procedure-interceptor client) request opts))
+
+(defn query
+  [client request & {:as opts}]
+  (execute-xrpc client (query-interceptor client) request opts))

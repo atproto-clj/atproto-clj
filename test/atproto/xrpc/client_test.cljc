@@ -166,6 +166,156 @@
            (is (= 0 @refresh-calls)))))))
 
 #?(:clj
+   (deftest error-taxonomy-test
+     ;; a JSON error body is preserved verbatim and enriched
+     (let [{:keys [handler]} (fake-http/scripted
+                              [(fake-http/json-response 400 {:error "InvalidSwap"
+                                                             :message "Commit was at bafy..."})])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/procedure xrpc {:nsid "com.example.proc" :body {:a 1}})
+                           1000 ::timeout)]
+           (is (= "InvalidSwap" (:error resp)))
+           (is (= "Commit was at bafy..." (:message resp)))
+           (is (= 400 (:status resp)))
+           (is (false? (:retryable? resp)))
+           (is (map? (:headers resp)))
+           (is (some? (:http-response resp))))))
+     ;; non-JSON error bodies derive the name from the status; no HTTP_<status>
+     (let [{:keys [handler]} (fake-http/scripted
+                              [{:status 502
+                                :headers {:content-type "text/html"}
+                                :body "<html>Bad Gateway</html>"}])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/query xrpc {:nsid "com.example.query"})
+                           1000 ::timeout)]
+           (is (= "UpstreamFailure" (:error resp)))
+           (is (= 502 (:status resp)))
+           (is (true? (:retryable? resp))))))
+     ;; transport failures become retryable network errors
+     (let [{:keys [handler]} (fake-http/scripted
+                              [{:error "HTTPClientError" :message "connection refused"}])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/query xrpc {:nsid "com.example.query"})
+                           1000 ::timeout)]
+           (is (= "HTTPClientError" (:error resp)))
+           (is (true? (:retryable? resp)))
+           (is (nil? (:status resp))))))))
+
+#?(:clj
+   (deftest success-headers-metadata-test
+     (let [{:keys [handler]} (fake-http/scripted
+                              [(fake-http/json-response 200
+                                                        {:ratelimit-remaining "10"}
+                                                        {:result "ok"})])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/query xrpc {:nsid "com.example.query"})
+                           1000 ::timeout)]
+           (is (= {:result "ok"} resp))
+           (is (= "10" (:ratelimit-remaining (client/response-headers resp))))
+           (is (= "application/json" (:content-type (client/response-headers resp)))))))))
+
+#?(:clj
+   (deftest request-validation-error-map-test
+     ;; client-side validation failures return an error map instead of throwing
+     (let [{:keys [handler requests]} (fake-http/scripted [])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/query xrpc {:nsid "com.example.query"
+                                               :params "not-a-map"})
+                           1000 ::timeout)]
+           (is (= "InvalidRequest" (:error resp)))
+           (is (false? (:retryable? resp)))
+           (is (some? (:explain-data resp)))
+           ;; the request never reached the wire
+           (is (empty? @requests)))))))
+
+#?(:clj
+   (deftest header-merge-test
+     ;; precedence: client defaults < per-request < computed content-type
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(fake-http/json-response {:ok true})])
+           xrpc (client/init {:service "https://pds.test"
+                              :headers {:x-default "client"
+                                        :x-shared "client"}})]
+       (with-redefs [http/handle-request handler]
+         (deref (client/procedure xrpc {:nsid "com.example.proc"
+                                        :body {:a 1}
+                                        :headers {:x-shared "request"
+                                                  :x-request "request"}})
+                1000 ::timeout)
+         (let [headers (:headers (first @requests))]
+           (is (= "client" (:x-default headers)))
+           (is (= "request" (:x-shared headers)))
+           (is (= "request" (:x-request headers)))
+           (is (= "application/json" (:content-type headers))))))
+     ;; supplying :content-type alongside a body is an error
+     (let [{:keys [handler requests]} (fake-http/scripted [])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/procedure xrpc {:nsid "com.example.proc"
+                                                   :body {:a 1}
+                                                   :headers {:content-type "text/plain"}})
+                           1000 ::timeout)]
+           (is (= "InvalidRequest" (:error resp)))
+           (is (empty? @requests)))))))
+
+#?(:clj
+   (deftest service-proxy-test
+     ;; client-level :service-proxy emits atproto-proxy
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       (repeat 2 (fake-http/json-response {:ok true})))
+           xrpc (client/init {:service "https://pds.test"
+                              :service-proxy "did:web:api.bsky.app#bsky_appview"})]
+       (with-redefs [http/handle-request handler]
+         (deref (client/query xrpc {:nsid "com.example.query"}) 1000 ::timeout)
+         (is (= "did:web:api.bsky.app#bsky_appview"
+                (:atproto-proxy (:headers (first @requests)))))
+         ;; a per-request atproto-proxy header wins
+         (deref (client/query xrpc {:nsid "com.example.query"
+                                    :headers {:atproto-proxy "did:web:other.test#other"}})
+                1000 ::timeout)
+         (is (= "did:web:other.test#other"
+                (:atproto-proxy (:headers (second @requests)))))))
+     ;; with-service-proxy returns a routed copy of the client
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(fake-http/json-response {:ok true})])
+           xrpc (-> (client/init {:service "https://pds.test"})
+                    (client/with-service-proxy "did:web:api.bsky.app#bsky_appview"))]
+       (with-redefs [http/handle-request handler]
+         (deref (client/query xrpc {:nsid "com.example.query"}) 1000 ::timeout)
+         (is (= "did:web:api.bsky.app#bsky_appview"
+                (:atproto-proxy (:headers (first @requests)))))))
+     ;; malformed proxy strings are rejected
+     (is (thrown? #?(:clj Exception :cljs js/Error)
+                  (client/init {:service "https://pds.test"
+                                :service-proxy "not-a-proxy"})))
+     (is (thrown? #?(:clj Exception :cljs js/Error)
+                  (client/with-service-proxy (client/init {:service "https://pds.test"})
+                    "did:web:api.bsky.app")))))
+
+#?(:clj
+   (deftest labelers-test
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       (repeat 2 (fake-http/json-response {:ok true})))
+           xrpc (-> (client/init {:service "https://pds.test"})
+                    (client/with-labelers [{:did "did:plc:label1" :redact? true}
+                                           "did:plc:label2"]))]
+       (with-redefs [http/handle-request handler]
+         (deref (client/query xrpc {:nsid "com.example.query"}) 1000 ::timeout)
+         (is (= "did:plc:label1;redact, did:plc:label2"
+                (:atproto-accept-labelers (:headers (first @requests)))))
+         ;; a per-request value is merged after the client's labelers
+         (deref (client/query xrpc {:nsid "com.example.query"
+                                    :headers {:atproto-accept-labelers "did:plc:label3"}})
+                1000 ::timeout)
+         (is (= "did:plc:label1;redact, did:plc:label2, did:plc:label3"
+                (:atproto-accept-labelers (:headers (second @requests)))))))))
+
+#?(:clj
    (deftest single-flight-refresh-test
      (let [refresh-calls (atom 0)
            release (promise)

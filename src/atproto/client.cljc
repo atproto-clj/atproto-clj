@@ -23,7 +23,13 @@
   :service            Handle, DID, or app URL to connect to.
   :session            Required to make authenticated requests to the service.
   :credentials        Convenience to automatically create a credentials-based session.
-  :validate-requests? Whether to validate requests before sending them to the server."
+  :validate-requests? Whether to validate requests before sending them to the server.
+  :headers            Map of default headers for every request (lowercase keyword keys).
+  :service-proxy      \"<did>#<service-id>\" emitted as the atproto-proxy header.
+  :labelers           Coll of labeler DIDs (or {:did ... :redact? true} maps) emitted
+                      as the atproto-accept-labelers header.
+  :timeout            Default per-request timeout in ms.
+  :max-retries        Default retry count for retryable errors (default 0 = off)."
   [{:keys [service credentials session validate-requests?] :as config} & {:as opts}]
   (let [[cb val] (i/platform-async opts)]
     (cond
@@ -56,7 +62,9 @@
       ;; Otherwise initialize an XRPC client for the service/session
       :else
       (cb (xrpc/init
-           (cond-> {:validate-requests? (boolean validate-requests?)}
+           (cond-> (merge (select-keys config [:headers :service-proxy :labelers
+                                               :timeout :max-retries])
+                          {:validate-requests? (boolean validate-requests?)})
              service (assoc :service service)
              session (assoc :session session)))))
     val))
@@ -71,10 +79,15 @@
   "Call the procedure on the server with the given parameters.
 
   The `request` map accepts the following keys:
-  :nsid      NSID of the procedure, `string`, required.
-  :params    Procedure parameters, `map`, optional.
-  :body      Body of the procedure call, `::atproto/data` or `bytes`, optional
-  :encoding  MIME type of the body, `string`, required if the body are `bytes`."
+  :nsid         NSID of the procedure, `string`, required.
+  :params       Procedure parameters, `map`, optional.
+  :body         Body of the procedure call, `::atproto/data` or `bytes`, optional
+  :encoding     MIME type of the body, `string`, required if the body are `bytes`.
+  :headers      Per-request headers, `map`, optional (override the client's
+                defaults; setting :content-type alongside a body is an error).
+  :timeout      Request timeout in ms, optional (overrides the client default).
+  :max-retries  Retry count for retryable errors, optional (default 0 = off).
+  :signal       Abort signal (see atproto.xrpc.client/abort-signal), optional."
   [client request & {:as opts}]
   (xrpc/procedure client request opts))
 
@@ -82,7 +95,11 @@
   "Issue a query against the server with the given parameters.
 
   The `request` map accepts the following keys:
-  :nsid      NSID of the query, `string`, required.
-  :params    Query parameters, `map`, optional."
+  :nsid         NSID of the query, `string`, required.
+  :params       Query parameters, `map`, optional.
+  :headers      Per-request headers, `map`, optional.
+  :timeout      Request timeout in ms, optional (overrides the client default).
+  :max-retries  Retry count for retryable errors, optional (default 0 = off).
+  :signal       Abort signal (see atproto.xrpc.client/abort-signal), optional."
   [client request & {:as opts}]
   (xrpc/query client request opts))
