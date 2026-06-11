@@ -426,6 +426,121 @@
                            1000 ::timeout)]
            (is (= "Aborted" (:error resp))))))))
 
+(defn- record-page
+  ([records] (record-page records nil))
+  ([records cursor]
+   (fake-http/json-response (cond-> {:records records}
+                              cursor (assoc :cursor cursor)))))
+
+#?(:clj
+   (deftest fetch-all-test
+     ;; pages are collected, threading :cursor through the query params
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(record-page [1 2] "a")
+                                        (record-page [3] "b")
+                                        (record-page [4])])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/fetch-all xrpc {:nsid "com.example.list"})
+                           1000 ::timeout)]
+           (is (= [1 2 3 4] resp))
+           (is (= 3 (count @requests)))
+           (is (nil? (get-in (first @requests) [:query-params :cursor])))
+           (is (= "a" (get-in (second @requests) [:query-params :cursor])))
+           (is (= "b" (get-in (nth @requests 2) [:query-params :cursor]))))))
+     ;; :max-pages stops the pagination
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(record-page [1 2] "a")
+                                        (record-page [3] "b")
+                                        (record-page [4])])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/fetch-all xrpc {:nsid "com.example.list"} :max-pages 2)
+                           1000 ::timeout)]
+           (is (= [1 2 3] resp))
+           (is (= 2 (count @requests))))))
+     ;; an empty page stops the pagination even with a cursor
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(record-page [1] "a")
+                                        (record-page [] "b")
+                                        (record-page [2])])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/fetch-all xrpc {:nsid "com.example.list"})
+                           1000 ::timeout)]
+           (is (= [1] resp))
+           (is (= 2 (count @requests))))))
+     ;; an error mid-stream is delivered as the result
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(record-page [1] "a")
+                                        (fake-http/json-response 500 {:error "InternalServerError"})])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/fetch-all xrpc {:nsid "com.example.list"})
+                           1000 ::timeout)]
+           (is (= "InternalServerError" (:error resp)))
+           (is (= 2 (count @requests))))))
+     ;; custom :items-fn/:cursor-fn
+     (let [{:keys [handler]} (fake-http/scripted
+                              [(fake-http/json-response {:repos [1] :next "a"})
+                               (fake-http/json-response {:repos [2]})])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/fetch-all xrpc {:nsid "com.example.list"}
+                                             :items-fn :repos
+                                             :cursor-fn :next)
+                           1000 ::timeout)]
+           (is (= [1 2] resp)))))))
+
+#?(:clj
+   (deftest fetch-pages-test
+     ;; a reduced accumulator short-circuits
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(record-page [1 2] "a")
+                                        (record-page [3] "b")
+                                        (record-page [4])])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [resp (deref (client/fetch-pages xrpc {:nsid "com.example.list"}
+                                               (fn [acc page]
+                                                 (let [acc (into acc (:records page))]
+                                                   (if (<= 3 (count acc))
+                                                     (reduced acc)
+                                                     acc)))
+                                               [])
+                           1000 ::timeout)]
+           (is (= [1 2 3] resp))
+           (is (= 2 (count @requests))))))))
+
+#?(:clj
+   (deftest page-seq-test
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       [(record-page [1 2] "a")
+                                        (record-page [3])])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [pages (client/page-seq xrpc {:nsid "com.example.list"})]
+           (is (= [[1 2] [3]] (map :records pages)))
+           (is (= 2 (count @requests))))))
+     ;; laziness: only the realized pages are fetched
+     (let [{:keys [handler requests]} (fake-http/scripted
+                                       (repeat 10 (record-page [1] "more")))
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [pages (client/page-seq xrpc {:nsid "com.example.list"})]
+           (is (= 2 (count (take 2 pages))))
+           (is (>= 3 (count @requests))))))
+     ;; an error page ends the seq
+     (let [{:keys [handler]} (fake-http/scripted
+                              [(record-page [1] "a")
+                               (fake-http/json-response 500 {:error "InternalServerError"})])
+           xrpc (client/init {:service "https://pds.test"})]
+       (with-redefs [http/handle-request handler]
+         (let [pages (vec (client/page-seq xrpc {:nsid "com.example.list"}))]
+           (is (= 2 (count pages)))
+           (is (= [1] (:records (first pages))))
+           (is (= "InternalServerError" (:error (last pages)))))))))
+
 #?(:clj
    (deftest single-flight-refresh-test
      (let [refresh-calls (atom 0)

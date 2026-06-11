@@ -408,3 +408,79 @@
 (defn query
   [client request & {:as opts}]
   (execute-xrpc client (query-interceptor client) request opts))
+
+(defn- no-cursor?
+  [cursor]
+  (or (nil? cursor)
+      (and (string? cursor) (str/blank? cursor))))
+
+(defn fetch-pages
+  "Cursor pagination driver.
+
+  Repeatedly calls `query` with :cursor threaded from each response into the
+  request's :params, invoking (step-fn acc page) per page (a `reduced` acc
+  short-circuits). Stops when the response has no cursor, the page's items
+  are empty, :max-pages is reached, or an error occurs (the error map is
+  then the delivered result). Async like everything else; the deferred value
+  is the final acc.
+
+  opts: :items-fn (default :records), :cursor-fn (default :cursor),
+        :max-pages, plus :channel/:callback/:promise."
+  [client request step-fn init-acc & {:as opts}]
+  (let [items-fn (or (:items-fn opts) :records)
+        cursor-fn (or (:cursor-fn opts) :cursor)
+        max-pages (:max-pages opts)
+        [cb val] (i/platform-async (select-keys opts [:channel :callback :promise]))]
+    (letfn [(fetch! [request acc page-count]
+              (query client request
+                     :callback
+                     (fn [page]
+                       (if (:error page)
+                         (cb page)
+                         (let [result (step-fn acc page)
+                               acc (unreduced result)
+                               cursor (cursor-fn page)
+                               page-count (inc page-count)]
+                           (if (or (reduced? result)
+                                   (no-cursor? cursor)
+                                   (empty? (items-fn page))
+                                   (and max-pages (<= max-pages page-count)))
+                             (cb acc)
+                             (fetch! (assoc-in request [:params :cursor] cursor)
+                                     acc
+                                     page-count)))))))]
+      (fetch! request init-acc 0))
+    val))
+
+(defn fetch-all
+  "fetch-pages collecting (items-fn page) from every page into a single
+  vector. Guard unbounded collections with :max-pages."
+  [client request & {:as opts}]
+  (let [items-fn (or (:items-fn opts) :records)]
+    (fetch-pages client request
+                 (fn [acc page] (into acc (items-fn page)))
+                 []
+                 opts)))
+
+#?(:clj
+   (defn page-seq
+     "Lazy seq of page bodies, paginating like `fetch-pages`; each step blocks
+     on the underlying promise. CLJ-only convenience; do not use on
+     event-loop threads. If a page fetch fails, the error map is the final
+     element of the seq.
+
+     opts: :items-fn (default :records), :cursor-fn (default :cursor)."
+     [client request & {:as opts}]
+     (let [items-fn (or (:items-fn opts) :records)
+           cursor-fn (or (:cursor-fn opts) :cursor)
+           step (fn step [request]
+                  (lazy-seq
+                   (let [page @(query client request)]
+                     (if (:error page)
+                       (list page)
+                       (let [cursor (cursor-fn page)]
+                         (cons page
+                               (when-not (or (no-cursor? cursor)
+                                             (empty? (items-fn page)))
+                                 (step (assoc-in request [:params :cursor] cursor)))))))))]
+       (step request))))
