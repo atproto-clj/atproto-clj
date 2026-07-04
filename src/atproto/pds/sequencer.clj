@@ -1,44 +1,32 @@
 (ns atproto.pds.sequencer
   "Durable, totally-ordered event log backing com.atproto.sync.subscribeRepos.
 
-  A single SQLite database with the repo_seq table
-  (packages/pds/src/sequencer/db/schema.ts); the AUTOINCREMENT primary
-  key is the stream's total order. Like the reference, this assumes a
-  single sequencer process per database: multi-process deployments would
-  need an external ordering authority.
+  This namespace owns the library logic: event formatting per the
+  reference (packages/pds/src/sequencer/events.ts), DAG-CBOR encoding
+  (WS-02) and CAR slices (WS-04), timestamping, cursor queries, and a
+  background poll loop delivering freshly-sequenced batches (up to 1000
+  rows) to `subscribe` listeners with exponential backoff capped at 1s
+  when idle (writes poke the loop so delivery is prompt).
 
-  Event payloads are DAG-CBOR-encoded (WS-02) maps shaped like the
-  subscribeRepos message bodies minus :seq/:time, which are added at
-  emission from the row (packages/pds/src/sequencer/events.ts). Commit
-  and sync payloads embed CAR slices produced with the WS-04 writer.
+  Persistence and ordering live behind the
+  atproto.pds.sequencer.storage/SequencerStorage protocol; pass an
+  implementation to `init` (atproto.pds.sequencer.memory or
+  atproto.pds.sequencer.sqlite ship with the SDK).
 
-  Write fns and init/close! are async per the SDK convention; cursor
-  queries are synchronous and cheap. A background poll loop delivers
-  newly-committed batches (up to 1000 rows) to `subscribe` listeners,
-  with exponential backoff capped at 1s when idle; writes poke the loop
-  so delivery is prompt."
+  Event payloads are maps shaped like the subscribeRepos message bodies
+  minus :seq/:time, which are added at emission from the row. Write fns
+  and init/close! are async per the SDK convention; cursor queries are
+  synchronous and cheap."
   (:require [clojure.core.async :as async]
             [atproto.data :as data]
             [atproto.data.cbor :as cbor]
             [atproto.repo.car :as car]
             [atproto.runtime.cast :as cast]
             [atproto.runtime.interceptor :as i]
-            [atproto.pds.sql :as sql]))
+            [atproto.pds.sql :as sql]
+            [atproto.pds.sequencer.storage :as storage]))
 
 (set! *warn-on-reflection* true)
-
-(def migrations
-  [["001-init"
-    [(str "CREATE TABLE repo_seq ("
-          "seq INTEGER PRIMARY KEY AUTOINCREMENT, "
-          "did TEXT NOT NULL, "
-          "eventType TEXT NOT NULL, "
-          "event BLOB NOT NULL, "
-          "invalidated INTEGER NOT NULL DEFAULT 0, "
-          "sequencedAt TEXT NOT NULL)")
-     "CREATE INDEX repo_seq_did_idx ON repo_seq (did)"
-     "CREATE INDEX repo_seq_event_type_idx ON repo_seq (eventType)"
-     "CREATE INDEX repo_seq_sequenced_at_idx ON repo_seq (sequencedAt)"]]])
 
 (defn- async-opts [opts] (select-keys opts [:channel :callback :promise]))
 
@@ -115,46 +103,34 @@
 ;; Sequencer
 ;; -----------------------------------------------------------------------------
 
-;; The sequencer opens a short-lived connection per operation (WAL mode:
-;; many readers, serialized writers), so writes may come from any thread.
-(defrecord Sequencer [db-path state notify-ch poll-thread])
+(defrecord Sequencer [storage state notify-ch poll-thread])
 
 (defn- row->event
+  "Decode a storage row into {:seq :did :type :event :time}."
   [row]
   {:seq (:seq row)
    :did (:did row)
-   :type (case (:eventType row)
+   :type (case (:event-type row)
            "append" :commit
-           (keyword (:eventType row)))
+           (keyword (:event-type row)))
    :event (cbor/decode (:event row))
-   :time (:sequencedAt row)})
+   :time (:sequenced-at row)})
 
 (defn current-seq
   "The latest sequenced seq, or nil for an empty log. Sync."
-  [{:keys [db-path]}]
-  (with-open [conn (sql/connect db-path)]
-    (:seq (sql/execute-one!
-           conn ["SELECT seq FROM repo_seq ORDER BY seq DESC LIMIT 1"]))))
+  [{:keys [storage]}]
+  (storage/current-seq storage))
 
 (defn next-after
-  "The first event row with seq > cursor, or nil. Sync."
-  [{:keys [db-path]} cursor]
-  (with-open [conn (sql/connect db-path)]
-    (some-> (sql/execute-one!
-             conn ["SELECT * FROM repo_seq WHERE seq > ? ORDER BY seq ASC LIMIT 1"
-                   (long (or cursor 0))])
-            row->event)))
+  "The first (decoded) event with seq > cursor, or nil. Sync."
+  [{:keys [storage]} cursor]
+  (some-> (storage/next-after storage cursor) row->event))
 
 (defn earliest-after-time
-  "The earliest event row sequenced at or after the ISO datetime, or nil.
-  Sync."
-  [{:keys [db-path]} time]
-  (with-open [conn (sql/connect db-path)]
-    (some-> (sql/execute-one!
-             conn [(str "SELECT * FROM repo_seq WHERE sequencedAt >= ? "
-                        "ORDER BY sequencedAt ASC LIMIT 1")
-                   time])
-            row->event)))
+  "The earliest (decoded) event sequenced at or after the ISO datetime,
+  or nil. Sync."
+  [{:keys [storage]} time]
+  (some-> (storage/earliest-after-time storage time) row->event))
 
 (defn request-range
   "Decoded events with seq in (earliest-seq, latest-seq], oldest first,
@@ -162,34 +138,24 @@
 
   opts: :earliest-seq (default 0), :latest-seq, :earliest-time, :limit.
   Sync."
-  [{:keys [db-path]} {:keys [earliest-seq latest-seq earliest-time limit]}]
-  (with-open [conn (sql/connect db-path)]
-    (mapv row->event
-          (sql/execute!
-           conn
-           (cond-> [(str "SELECT * FROM repo_seq WHERE invalidated = 0 AND seq > ?"
-                         (when latest-seq " AND seq <= ?")
-                         (when earliest-time " AND sequencedAt >= ?")
-                         " ORDER BY seq ASC"
-                         (when limit " LIMIT ?"))
-                    (long (or earliest-seq 0))]
-             latest-seq (conj (long latest-seq))
-             earliest-time (conj earliest-time)
-             limit (conj (long limit)))))))
+  [{:keys [storage]} opts]
+  (mapv row->event (storage/request-range storage opts)))
+
+(defn invalidate!
+  "Mark a sequenced event invalidated (excluded from request-range and
+  the firehose; reference invalidation semantics). Sync."
+  [{:keys [storage]} seq]
+  (storage/invalidate! storage seq))
 
 (defn- sequence-evt!
-  [{:keys [db-path notify-ch] :as seqr} did event-type evt cb]
+  [{:keys [storage notify-ch]} did event-type evt cb]
   (cb (attempt
        (fn []
-         (let [seq (sql/retry-busy
-                    (fn []
-                      (with-open [conn (sql/connect db-path)]
-                        (:seq (sql/execute-one!
-                               conn
-                               [(str "INSERT INTO repo_seq "
-                                     "(did, eventType, event, invalidated, sequencedAt) "
-                                     "VALUES (?, ?, ?, 0, ?) RETURNING seq")
-                                did event-type (cbor/encode evt) (sql/now-iso)])))))]
+         (let [seq (storage/append-event! storage
+                                          {:did did
+                                           :event-type event-type
+                                           :event (cbor/encode evt)
+                                           :sequenced-at (sql/now-iso)})]
            (async/offer! notify-ch :new-events)
            {:seq seq})))))
 
@@ -261,21 +227,24 @@
             (recur last-seen (min max-poll-wait-ms (* 2 wait-ms)))))))))
 
 (defn init
-  "Open (creating/migrating as needed) the sequencer database and start
-  the poll loop.
+  "Start a sequencer over a SequencerStorage implementation.
 
-  config: {:db-path path}
+  config: {:storage <atproto.pds.sequencer.storage/SequencerStorage>}
+  (see atproto.pds.sequencer.memory/open and
+  atproto.pds.sequencer.sqlite/open)
+
   Async; yields the sequencer or {:error ...}."
-  [{:keys [db-path] :as config} & {:as opts}]
+  [{:keys [storage] :as config} & {:as opts}]
   (let [[cb val] (i/platform-async (async-opts opts))]
     (cb (attempt
          (fn []
-           (sql/ensure-parent-dir! db-path)
-           (with-open [conn (sql/connect db-path)]
-             (sql/migrate! conn migrations))
+           (when-not (satisfies? storage/SequencerStorage storage)
+             (throw (ex-info "config requires a :storage implementing SequencerStorage."
+                             {:error "InvalidStorage"
+                              :message "config requires a :storage implementing SequencerStorage."})))
            (let [state (atom {:listeners {} :closed? false})
                  notify-ch (async/chan (async/dropping-buffer 1))
-                 seqr (->Sequencer db-path state notify-ch nil)
+                 seqr (->Sequencer storage state notify-ch nil)
                  thread (doto (Thread. ^Runnable #(run-poll-loop seqr)
                                        "atproto-sequencer-poll")
                           (.setDaemon true)
@@ -284,12 +253,13 @@
     val))
 
 (defn close!
-  "Stop the poll loop. Async; yields {:closed true}."
-  [{:keys [state notify-ch ^Thread poll-thread]} & {:as opts}]
+  "Stop the poll loop and close the storage. Async; yields {:closed true}."
+  [{:keys [storage state notify-ch ^Thread poll-thread]} & {:as opts}]
   (let [[cb val] (i/platform-async (async-opts opts))]
     (swap! state assoc :closed? true)
     (async/offer! notify-ch :closed)
     (when poll-thread
       (.join poll-thread 5000))
+    (storage/close! storage)
     (cb {:closed true})
     val))

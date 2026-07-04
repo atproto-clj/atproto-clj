@@ -137,9 +137,9 @@ The platform-specific functions are under the `atproto.runtime` namespace. Most 
 | `credentials`  | Credentials-based session to use with the ATProto client. |
 | `oauth.client` | OAuth 2.0 client for ATProto profile. Create a session that can be used with the ATProto client. |
 | `oauth.provider` | OAuth 2.0 authorization server (provider) for ATProto: PAR, DPoP-bound tokens, and a resource-server verifier. |
-| `pds.actor-store` | Durable per-actor repo storage: SQLite blockstore, record index, and signing-key persistence. |
+| `pds.actor-store` | Durable per-actor repo storage (blocks, record/backlink/blob indexes, signing keys) behind a storage protocol, with in-memory and SQLite implementations. |
 | `pds.blobstore` | Blob storage protocol (temp → permanent → quarantine) with a filesystem implementation. |
-| `pds.sequencer` / `pds.firehose` | Ordered event log and `com.atproto.sync.subscribeRepos` firehose emission (stream server). |
+| `pds.sequencer` / `pds.firehose` | Ordered event log behind a storage protocol (in-memory and SQLite implementations) and `com.atproto.sync.subscribeRepos` firehose emission (stream server). |
 | `data`         | ATProto data model. |
 | `data.json`    | JSON-representation of the ATProto data model. |
 | `identity`     | Identity resolution (handles and DIDs). |

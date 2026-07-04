@@ -13,8 +13,9 @@
             [atproto.xrpc.frames :as frames]
             [atproto.xrpc.server :as xrpc-server]
             [atproto.xrpc.server.ring :as ring]
-            [atproto.pds.sql :as sql]
             [atproto.pds.sequencer :as sequencer]
+            [atproto.pds.sequencer.storage :as seq-storage]
+            [atproto.pds.sequencer.sqlite :as seq-sqlite]
             [atproto.pds.firehose :as firehose])
   (:import [java.io ByteArrayOutputStream]
            [java.net URI]
@@ -30,7 +31,8 @@
 (defn- with-sequencer
   [f]
   (let [dir (str (Files/createTempDirectory "firehose-test" (make-array FileAttribute 0)))
-        seqr @(sequencer/init {:db-path (str dir "/repo_seq.sqlite")})]
+        seqr @(sequencer/init {:storage (seq-sqlite/open
+                                         {:db-path (str dir "/repo_seq.sqlite")})})]
     (try
       (binding [*seqr* seqr]
         (f))
@@ -116,11 +118,17 @@
 
 (deftest outdated-cursor-test
   (let [seqr *seqr*
-        _ (seed-identity! seqr 5)
-        ;; age the first three events out of the backfill window
-        _ (with-open [conn (sql/connect (:db-path seqr))]
-            (sql/execute! conn ["UPDATE repo_seq SET sequencedAt = ? WHERE seq <= 3"
-                                "2020-01-01T00:00:00.000Z"]))
+        ;; seed three events already aged out of the backfill window
+        ;; (appended at the storage level so the timestamps are ours)
+        _ (dotimes [i 3]
+            (seq-storage/append-event!
+             (:storage seqr)
+             {:did "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+              :event-type "identity"
+              :event (cbor/encode {:did "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+                                   :handle (str "old" i ".test")})
+              :sequenced-at "2020-01-01T00:00:00.000Z"}))
+        _ (seed-identity! seqr 2)
         close-ch (async/chan)
         {:keys [messages]} (firehose/handler seqr {:params {:cursor 0}
                                                    :close-ch close-ch})
