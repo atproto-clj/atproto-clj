@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented (M1–M5 merged together, 2026-06-11) |
 | **Priority** | P1 |
 | **Estimated size** | M |
 | **Branch** | ws/06-identity-plc |
@@ -418,23 +418,23 @@ Run with `clj -M:test` (cognitect test-runner, deps.edn `:test` alias).
 
 ## Acceptance criteria
 
-- [ ] `(resolve-did "did:web:example.com")`-shaped calls fetch and validate `https://example.com/.well-known/did.json`; localhost gets http; path-form did:web returns `{:error "UnsupportedDidWebPath"}`; `fetch-did-doc "web"` no longer returns `NotImplemented`.
-- [ ] Every resolved DID document is schema-validated and its `:id` checked against the requested DID; mismatch yields `{:error "PoorlyFormattedDidDocument"}`.
-- [ ] `resolve-did`/`resolve-identity` accept `:cache`, `:cache-policy`, `:force-refresh`; with a `memory-cache`, a second resolve within `:stale-ttl` performs zero network calls; a stale-but-not-expired hit returns the cached doc and triggers a background revalidate; an expired hit refetches.
-- [ ] `resolve-identity` with an invalid identifier returns `{:error "InvalidAtIdentifier"}` (no hang); `resolve-did` with an unsupported method returns `{:error "UnsupportedDidMethod"}` (no throw).
-- [ ] `did-for-create-op` recomputes the exact DID of vendored real-world audit logs (both legacy `create` and `plc_operation` genesis forms); `cid-for-op` reproduces every `cid` recorded in those logs.
-- [ ] `create-op`/`update-op`/`update-handle-op`/`update-pds-op`/`update-rotation-keys-op`/`update-signing-key-op`/`tombstone-op` produce ops conforming to the PLC v0.1 spec, signed with low-S unpadded-base64url signatures that `verify-op-sig` (and the reference directory, in the manual integration test) accept.
-- [ ] PLC directory client covers GET `/{did}`, `/{did}/data`, `/{did}/log`, `/{did}/log/audit`, `/{did}/log/last`, `/export`, POST `/{did}`, with directory error bodies surfaced in error maps.
-- [ ] `verify-operation-log` validates vendored audit logs end-to-end and rejects misordered tombstones, broken prev chains, unauthorized signers, and >72h-late recoveries.
-- [ ] All public fns follow SDK conventions: .cljc, `& {:as opts}` + `i/platform-async`, `{:error ...}` maps, specs for inputs; `clj -M:test` green on every milestone merge.
+- [x] `(resolve-did "did:web:example.com")`-shaped calls fetch and validate `https://example.com/.well-known/did.json`; localhost gets http; path-form did:web returns `{:error "UnsupportedDidWebPath"}`; `fetch-did-doc "web"` no longer returns `NotImplemented`.
+- [x] Every resolved DID document is schema-validated and its `:id` checked against the requested DID; mismatch yields `{:error "PoorlyFormattedDidDocument"}`.
+- [x] `resolve-did`/`resolve-identity` accept `:cache`, `:cache-policy`, `:force-refresh`; with a `memory-cache`, a second resolve within `:stale-ttl` performs zero network calls; a stale-but-not-expired hit returns the cached doc and triggers a background revalidate; an expired hit refetches.
+- [x] `resolve-identity` with an invalid identifier returns `{:error "InvalidAtIdentifier"}` (no hang); `resolve-did` with an unsupported method returns `{:error "UnsupportedDidMethod"}` (no throw).
+- [x] `did-for-create-op` recomputes the exact DID of vendored real-world audit logs (both legacy `create` and `plc_operation` genesis forms); `cid-for-op` reproduces every `cid` recorded in those logs.
+- [x] `create-op`/`update-op`/`update-handle-op`/`update-pds-op`/`update-rotation-keys-op`/`update-signing-key-op`/`tombstone-op` produce ops conforming to the PLC v0.1 spec, signed with low-S unpadded-base64url signatures that `verify-op-sig` (and the reference directory, in the manual integration test) accept.
+- [x] PLC directory client covers GET `/{did}`, `/{did}/data`, `/{did}/log`, `/{did}/log/audit`, `/{did}/log/last`, `/export`, POST `/{did}`, with directory error bodies surfaced in error maps.
+- [x] `verify-operation-log` validates vendored audit logs end-to-end and rejects misordered tombstones, broken prev chains, unauthorized signers, and >72h-late recoveries.
+- [x] All public fns follow SDK conventions: .cljc, `& {:as opts}` + `i/platform-async`, `{:error ...}` maps, specs for inputs; `clj -M:test` green on every milestone merge.
 
 ## Milestones
 
-1. **M1 — did:web + resolution hardening** (no deps). Implement `fetch-did-doc "web"`, `:default` method, `::did-doc` validation, `resolve-identity` `:else` fix, HTTPS-fallback hygiene, strict id matching, `did-doc-signing-key`. Tests: did:web tables, DID-doc fixtures, DNS parse cases, regression tests.
-2. **M2 — identity cache** (no deps). `atproto.identity.cache` (protocol, memory impl, policy/check/store), wire into `resolve-did`/`resolve-identity` with SWR + optional negative caching. Tests: cache suite with fake clock.
-3. **M3 — PLC read-side** (no deps). `atproto.identity.plc` specs, `normalize-op`, directory GET client (`get-did-doc`/`get-data`/`get-operation-log`/`get-audit-log`/`get-last-op`/`export`). Vendor audit-log + data fixtures. Tests: specs, normalization, client error mapping (stubbed HTTP).
-4. **M4 — op construction & DID derivation** (needs WS-02 contract; WS-03 stubbable). `signing-payload`, `cid-for-op`, `did-for-create-op`, `sign-op`, `create-op`, `update-op` + convenience builders, `tombstone-op`, `submit`. Tests: golden CID/DID recomputation against fixtures; structure tests with fake signer; real-signature tests if WS-03 has merged.
-5. **M5 — audit-log verification** (needs WS-03 `verify-did-sig`). `verify-op-sig`, `verify-create-op`, `verify-operation-log` incl. recovery-window logic. Tests: fixture verification + adversarial hand-built logs. Optional manual integration against a locally run reference PLC server.
+1. **M1 — did:web + resolution hardening** ✅ (no deps). Implement `fetch-did-doc "web"`, `:default` method, `::did-doc` validation, `resolve-identity` `:else` fix, HTTPS-fallback hygiene, strict id matching, `did-doc-signing-key`. Tests: did:web tables, DID-doc fixtures, DNS parse cases, regression tests.
+2. **M2 — identity cache** ✅ (no deps). `atproto.identity.cache` (protocol, memory impl, policy/check/store), wire into `resolve-did`/`resolve-identity` with SWR + optional negative caching. Tests: cache suite with fake clock.
+3. **M3 — PLC read-side** ✅ (no deps). `atproto.identity.plc` specs, `normalize-op`, directory GET client (`get-did-doc`/`get-data`/`get-operation-log`/`get-audit-log`/`get-last-op`/`export`). Vendor audit-log + data fixtures. Tests: specs, normalization, client error mapping (stubbed HTTP).
+4. **M4 — op construction & DID derivation** ✅ (needs WS-02 contract; WS-03 stubbable). `signing-payload`, `cid-for-op`, `did-for-create-op`, `sign-op`, `create-op`, `update-op` + convenience builders, `tombstone-op`, `submit`. Tests: golden CID/DID recomputation against fixtures; structure tests with fake signer; real-signature tests if WS-03 has merged.
+5. **M5 — audit-log verification** ✅ (needs WS-03 `verify-did-sig`). `verify-op-sig`, `verify-create-op`, `verify-operation-log` incl. recovery-window logic. Tests: fixture verification + adversarial hand-built logs. Optional manual integration against a locally run reference PLC server.
 
 Each milestone is an independently mergeable PR leaving `clj -M:test` green (M4 merges with fake-signer tests if WS-03 hasn't landed; the WS-03-gated tests are added in M5 or a follow-up).
 

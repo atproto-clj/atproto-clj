@@ -8,8 +8,8 @@
 
 #?(:clj (set! *warn-on-reflection* true))
 
-;; To configure timeout and retries on the JVM
-;; See https://download.oracle.com/otn_hosted_doc/jdeveloper/904preview/jdk14doc/docs/guide/jndi/jndi-dns.html
+;; Timeout/retry configuration:
+;; https://download.oracle.com/otn_hosted_doc/jdeveloper/904preview/jdk14doc/docs/guide/jndi/jndi-dns.html
 
 (def interceptor
   #?(:clj
@@ -21,7 +21,9 @@
                               (let [dir-ctx (InitialDirContext.
                                              (Hashtable.
                                               {"java.naming.factory.initial"
-                                               "com.sun.jndi.dns.DnsContextFactory"}))]
+                                               "com.sun.jndi.dns.DnsContextFactory"
+                                               "com.sun.jndi.dns.timeout.initial" "3000"
+                                               "com.sun.jndi.dns.timeout.retries" "2"}))]
                                 {:values (seq (some-> dir-ctx
                                                       (.getAttributes hostname
                                                                       ^"[Ljava.lang.String;"

@@ -24,7 +24,7 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | Stream client       | 🟢 (Jetstream only) | ⭕ | ⭕ |
 | Service Auth        | 🟡 | 🟡 | ❓ |
 | Lex Codegen         | N/A | N/A | N/A |
-| PLC Operations      | ⭕ | ⭕ | ⭕ |
+| PLC Operations      | 🟢 | ⭕ | ⭕ |
 | OAuth Backend       | ⭕ | ⭕ | ⭕ |
 | **Service Pieces**  | | | |
 | HTTP Server         | 🟡 | 🟡 | ⭕ |
