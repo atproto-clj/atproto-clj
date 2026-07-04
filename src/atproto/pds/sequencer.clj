@@ -203,8 +203,11 @@
 (def ^:private max-poll-wait-ms 1000)
 
 (defn- run-poll-loop
-  [{:keys [state notify-ch] :as seqr}]
-  (loop [last-seen (or (current-seq seqr) 0)
+  "initial-seq is captured synchronously by init before the thread
+  starts: initializing it here would race with events sequenced between
+  init returning and the thread being scheduled, silently skipping them."
+  [{:keys [state notify-ch] :as seqr} initial-seq]
+  (loop [last-seen (long initial-seq)
          wait-ms min-poll-wait-ms]
     (when-not (:closed? @state)
       (let [batch (try
@@ -245,7 +248,10 @@
            (let [state (atom {:listeners {} :closed? false})
                  notify-ch (async/chan (async/dropping-buffer 1))
                  seqr (->Sequencer storage state notify-ch nil)
-                 thread (doto (Thread. ^Runnable #(run-poll-loop seqr)
+                 ;; capture the starting position before init returns, so
+                 ;; every event sequenced afterwards reaches subscribers
+                 initial-seq (long (or (storage/current-seq storage) 0))
+                 thread (doto (Thread. ^Runnable #(run-poll-loop seqr initial-seq)
                                        "atproto-sequencer-poll")
                           (.setDaemon true)
                           (.start))]

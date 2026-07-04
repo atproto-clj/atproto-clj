@@ -13,6 +13,7 @@
             [atproto.xrpc.frames :as frames]
             [atproto.xrpc.server :as xrpc-server]
             [atproto.xrpc.server.ring :as ring]
+            [atproto.test-support.wait :refer [wait-until]]
             [atproto.pds.sequencer :as sequencer]
             [atproto.pds.sequencer.storage :as seq-storage]
             [atproto.pds.sequencer.sqlite :as seq-sqlite]
@@ -143,11 +144,17 @@
 (deftest consumer-too-slow-test
   (let [seqr *seqr*
         close-ch (async/chan)
+        ;; a probe subscriber shares the poll loop's delivery batches, so
+        ;; once it has seen every event, the outbox listener has been
+        ;; offered them too and the bounded buffer has overflowed
+        probe-seen (atom 0)
+        unsub-probe (sequencer/subscribe seqr (fn [batch] (swap! probe-seen + (count batch))))
         {:keys [messages]} (firehose/handler seqr {:params {} :close-ch close-ch}
                                              :max-buffer-size 2)]
     (seed-identity! seqr 10)
-    ;; let the poll loop deliver into the bounded buffer while nobody reads
-    (Thread/sleep 500)
+    ;; don't read until delivery has happened, so the consumer can't keep up
+    (is (wait-until #(<= 10 @probe-seen)))
+    (unsub-probe)
     (let [received (collect-until messages #(:frame/error %) 5000)
           events (butlast received)]
       (is (= {:frame/error "ConsumerTooSlow"
@@ -161,13 +168,12 @@
 (deftest disconnect-unsubscribes-test
   (let [seqr *seqr*
         close-ch (async/chan)
+        listener-count #(count (:listeners @(:state seqr)))
         {:keys [messages]} (firehose/handler seqr {:params {} :close-ch close-ch})]
-    (Thread/sleep 100)
-    (is (= 1 (count (:listeners @(:state seqr)))))
+    (is (wait-until #(= 1 (listener-count))))
     (async/close! close-ch)
     (is (nil? (take-with-timeout messages 1000)))
-    (Thread/sleep 100)
-    (is (zero? (count (:listeners @(:state seqr)))))))
+    (is (wait-until #(zero? (listener-count))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Websocket integration through WS-08's transport
@@ -279,7 +285,10 @@
 
       (testing "a new event reaches an already-connected live subscriber"
         (let [result (future (ws-collect (ws-url "cursor=4") :abort-after 1))]
-          (Thread/sleep 300)
+          ;; the outbox subscribes to the sequencer as soon as the
+          ;; websocket subscription is up; wait for that instead of
+          ;; guessing at connection latency
+          (is (wait-until #(pos? (count (:listeners @(:state seqr))))))
           @(sequencer/sequence-identity! seqr did "fresh.test")
           (let [{:keys [frames error]} (deref result 6000 {:error :timeout})]
             (is (nil? error))

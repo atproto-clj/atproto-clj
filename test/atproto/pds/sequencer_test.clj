@@ -7,6 +7,7 @@
             [atproto.data.cbor :as cbor]
             [atproto.runtime.bytes :as bytes]
             [atproto.repo.car :as car]
+            [atproto.test-support.wait :refer [wait-until]]
             [atproto.pds.sequencer :as sequencer]
             [atproto.pds.sequencer.memory :as memory]
             [atproto.pds.sequencer.sqlite :as sqlite])
@@ -149,10 +150,18 @@
         (is (.await latch 5 TimeUnit/SECONDS))
         (is (= (range 1 11) (map :seq @seen)))
         (testing "unsubscribing stops delivery"
+          ;; negative assertion without a sleep: the unsubscribe happens
+          ;; before the event is appended, and the poll loop reads its
+          ;; listener set after fetching each batch, so once a probe
+          ;; listener (subscribed after the unsub) has seen the event,
+          ;; the unsubscribed listener can no longer receive it
           (unsub)
-          @(sequencer/sequence-identity! seqr did "late.test")
-          (Thread/sleep 200)
-          (is (= 10 (count @seen))))))))
+          (let [probe (atom [])
+                unsub-probe (sequencer/subscribe seqr (fn [batch] (swap! probe into batch)))]
+            @(sequencer/sequence-identity! seqr did "late.test")
+            (is (wait-until #(some (comp #{11} :seq) @probe)))
+            (unsub-probe)
+            (is (= 10 (count @seen)))))))))
 
 (deftest concurrent-writers-test
   ;; monotonic, gap-free, duplicate-free seqs under concurrent sequencing

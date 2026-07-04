@@ -140,30 +140,32 @@
                        (when-not (async/offer! live-buf evt)
                          (reset! overflowed? true)
                          (async/close! live-buf)))))
-        unsub (atom nil)]
+        ;; capture the stream position and subscribe before returning:
+        ;; doing either inside the driver thread would race with events
+        ;; sequenced right after this handler returns, dropping them from
+        ;; a live tail. Subscribing first also means no event can fall
+        ;; between the last backfill page and the first live delivery.
+        current (or (sequencer/current-seq seqr) 0)
+        unsub (sequencer/subscribe seqr listener)]
     (async/thread
       (try
-        (let [current (or (sequencer/current-seq seqr) 0)]
-          (if (and cursor (> cursor current))
-            (send! messages close-ch
-                   {:frame/error "FutureCursor"
-                    :frame/message "Cursor in the future."})
-            (let [[intro effective-cursor]
-                  (if cursor
-                    (check-outdated-cursor seqr cursor current backfill-window-ms)
-                    [nil nil])]
-              ;; subscribe before backfilling so no event falls between
-              ;; the last backfill page and the first live delivery
-              (reset! unsub (sequencer/subscribe seqr listener))
-              (when (or (nil? intro) (send! messages close-ch intro))
-                (let [last-seen (if effective-cursor
-                                  (run-backfill seqr messages close-ch effective-cursor)
-                                  current)]
-                  (when last-seen
-                    (run-live messages close-ch live-buf overflowed? last-seen)))))))
+        (if (and cursor (> cursor current))
+          (send! messages close-ch
+                 {:frame/error "FutureCursor"
+                  :frame/message "Cursor in the future."})
+          (let [[intro effective-cursor]
+                (if cursor
+                  (check-outdated-cursor seqr cursor current backfill-window-ms)
+                  [nil nil])]
+            (when (or (nil? intro) (send! messages close-ch intro))
+              (let [last-seen (if effective-cursor
+                                (run-backfill seqr messages close-ch effective-cursor)
+                                current)]
+                (when last-seen
+                  (run-live messages close-ch live-buf overflowed? last-seen))))))
         (catch Throwable t
           (cast/alert {:message "subscribeRepos outbox failed" :ex t}))
         (finally
-          (when-let [u @unsub] (u))
+          (unsub)
           (async/close! messages))))
     {:messages messages}))
