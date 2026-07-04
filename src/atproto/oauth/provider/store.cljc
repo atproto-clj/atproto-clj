@@ -109,7 +109,11 @@
           (get @state token-id))
         (find-by-refresh-token [_ refresh-token]
           (when refresh-token
-            (find-first #(= refresh-token (:refresh-token %)))))
+            ;; match the current refresh token, or a previously-rotated
+            ;; (used) one so reuse can be detected and the family revoked
+            (or (find-first #(= refresh-token (:refresh-token %)))
+                (find-first #(contains? (set (get-in % [:data :used-refresh-tokens]))
+                                        refresh-token)))))
         (find-by-code [_ code]
           (when code
             (find-first #(= code (get-in % [:data :code])))))
