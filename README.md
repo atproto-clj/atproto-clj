@@ -25,12 +25,12 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | Service Auth        | 🟡 | 🟡 | ❓ |
 | Lex Codegen         | N/A | N/A | N/A |
 | PLC Operations      | 🟢 | ⭕ | ⭕ |
-| OAuth Backend       | ⭕ | ⭕ | ⭕ |
+| OAuth Backend       | 🟢 | ⭕ | ⭕ |
 | **Service Pieces**  | | | |
 | HTTP Server         | 🟡 | 🟡 | ⭕ |
 | Identity Directory  | ⭕ | ⭕ | ⭕ |
-| Repo Storage        | ⭕ | ⭕ | ⭕ |
-| Stream Server       | ⭕ | ⭕ | ⭕ |
+| Repo Storage        | 🟢 | ⭕ | ⭕ |
+| Stream Server       | 🟢 | ⭕ | ⭕ |
 
 - ✅ great! complete, documented, examples, accessible to new devs with no atproto experience
 - 🟢 decent. mostly implemented, could point experienced devs at it
@@ -136,6 +136,10 @@ The platform-specific functions are under the `atproto.runtime` namespace. Most 
 | `client`       | ATProto client to make query and procedure calls to ATProto services. |
 | `credentials`  | Credentials-based session to use with the ATProto client. |
 | `oauth.client` | OAuth 2.0 client for ATProto profile. Create a session that can be used with the ATProto client. |
+| `oauth.provider` | OAuth 2.0 authorization server (provider) for ATProto: PAR, DPoP-bound tokens, and a resource-server verifier. |
+| `pds.actor-store` | Durable per-actor repo storage: SQLite blockstore, record index, and signing-key persistence. |
+| `pds.blobstore` | Blob storage protocol (temp → permanent → quarantine) with a filesystem implementation. |
+| `pds.sequencer` / `pds.firehose` | Ordered event log and `com.atproto.sync.subscribeRepos` firehose emission (stream server). |
 | `data`         | ATProto data model. |
 | `data.json`    | JSON-representation of the ATProto data model. |
 | `identity`     | Identity resolution (handles and DIDs). |
