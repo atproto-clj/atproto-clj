@@ -18,6 +18,7 @@
             [atproto.repo.car :as car]
             [atproto.repo.sync :as repo-sync]
             [atproto.repo.test-support.util :as util]
+            [atproto.runtime.cast :as cast]
             [atproto.sync.cursor :as cursor]
             [atproto.sync.firehose :as firehose]
             [atproto.sync.runner :as runner]
@@ -435,15 +436,17 @@
                   (sync-message :seq 4)]
         server (replay-server (fn [n] (when (= 1 n) (map message->frame-bytes messages))))
         events (atom [])
+        errors (atom [])
         done (promise)
         store (cursor/memory-store)
         handle (firehose/consume
                 {:service (str "ws://127.0.0.1:" (:port server))
                  :handler (collecting-handler events done #(= 4 (count %)))
                  :cursor-store store
-                 :on-error (fn [err] (println "unexpected on-error:" (pr-str err)))})]
+                 :on-error (fn [err] (swap! errors conj err))})]
     (try
       (is (true? (deref done 5000 ::timeout)))
+      (is (empty? @errors))
       (let [[commit ident account sync-ev] @events]
         (is (= :create (:kind commit)))
         (is (data/eq? post-record (:record commit)))
@@ -512,24 +515,159 @@
         server (replay-server (fn [n] (when (= 1 n) (map message->frame-bytes messages))))
         events (atom [])
         errors (atom [])
+        metrics (atom [])
+        store (cursor/memory-store)
         saw-gap (promise)
         saw-regression (promise)
+        real-metric cast/metric]
+    (with-redefs [cast/metric (fn [evt]
+                                (swap! metrics conj evt)
+                                (real-metric evt))]
+      (let [handle (firehose/consume
+                    {:service (str "ws://127.0.0.1:" (:port server))
+                     :handler (fn [event]
+                                (swap! events conj event)
+                                (when (= :gap (:kind event)) (deliver saw-gap event)))
+                     :cursor-store store
+                     :on-error (fn [err]
+                                 (swap! errors conj err)
+                                 (when (= "SeqRegression" (:error err))
+                                   (deliver saw-regression err)))})]
+        (try
+          (let [gap (deref saw-gap 5000 ::timeout)]
+            (is (= {:kind :gap :seq 5 :prev-seq 1} gap)))
+          (let [regression (deref saw-regression 5000 ::timeout)]
+            (is (= 3 (:seq regression))))
+          ;; The regressed message was skipped.
+          (is (= [1 5] (keep :seq (remove #(= :gap (:kind %)) @events))))
+          ;; The gap emitted a cast metric.
+          (is (some #(= :firehose/seq-gap (:name %)) @metrics))
+          ;; The gap event itself never advances the cursor: the store holds
+          ;; a seq only once that seq's real events were handled.
+          (let [c (promise)]
+            (cursor/get-cursor store #(deliver c %))
+            (is (= {:cursor 5} (deref c 1000 ::timeout))))
+          (finally
+            (firehose/stop! handle)
+            (ws-server/stop! server)))))))
+
+(deftest consume-gap-does-not-advance-cursor-test
+  ;; A gap event alone (its seq's real events still unhandled because the
+  ;; handler blocks) must not move the cursor store.
+  (let [messages [(identity-message :seq 1)
+                  (identity-message :seq 5)]    ;; gap: handler blocks on it
+        server (replay-server (fn [n] (when (= 1 n) (map message->frame-bytes messages))))
+        store (cursor/memory-store)
+        gap-started (promise)
+        release (promise)
+        done (promise)
+        handle (firehose/consume
+                {:service (str "ws://127.0.0.1:" (:port server))
+                 :handler (fn [event]
+                            (when (= :gap (:kind event))
+                              (deliver gap-started true)
+                              (deref release 5000 nil))
+                            (when (= 5 (:seq event)) (deliver done true)))
+                 :cursor-store store})]
+    (try
+      (is (true? (deref gap-started 5000 ::timeout)))
+      ;; seq 1 was handled; the gap (seq 5) is in the handler now, and the
+      ;; real seq-5 event has not been handled yet -> cursor must still be 1.
+      (let [c (promise)]
+        (cursor/get-cursor store #(deliver c %))
+        (is (= {:cursor 1} (deref c 1000 ::timeout))))
+      (deliver release true)
+      (is (true? (deref done 5000 ::timeout)))
+      (finally
+        (deliver release true)
+        (firehose/stop! handle)
+        (ws-server/stop! server)))))
+
+(deftest consume-cursor-written-after-handler-test
+  ;; Direct-handler mode: the store must not see an event's seq until its
+  ;; handler has returned.
+  (let [messages [(identity-message :seq 1)]
+        server (replay-server (fn [n] (when (= 1 n) (map message->frame-bytes messages))))
+        store (cursor/memory-store)
+        in-handler (promise)
+        release (promise)
+        handle (firehose/consume
+                {:service (str "ws://127.0.0.1:" (:port server))
+                 :handler (fn [_]
+                            (deliver in-handler true)
+                            (deref release 5000 nil))
+                 :cursor-store store})]
+    (try
+      (is (true? (deref in-handler 5000 ::timeout)))
+      (let [c (promise)]
+        (cursor/get-cursor store #(deliver c %))
+        (is (= {:cursor nil} (deref c 1000 ::timeout))))
+      (deliver release true)
+      (loop [n 0]
+        (let [c (promise)]
+          (cursor/get-cursor store #(deliver c (:cursor %)))
+          (when (and (not= 1 (deref c 1000 nil)) (< n 100))
+            (Thread/sleep 20)
+            (recur (inc n)))))
+      (let [c (promise)]
+        (cursor/get-cursor store #(deliver c %))
+        (is (= {:cursor 1} (deref c 1000 ::timeout))))
+      (finally
+        (deliver release true)
+        (firehose/stop! handle)
+        (ws-server/stop! server)))))
+
+(deftest consume-unknown-type-skipped-test
+  (let [unknown {:$type "com.atproto.sync.subscribeRepos#warp" :seq 1}
+        ok (identity-message :seq 2)
+        server (replay-server
+                (fn [n] (when (= 1 n) (map message->frame-bytes [unknown ok]))))
+        events (atom [])
+        errors (atom [])
+        done (promise)
         handle (firehose/consume
                 {:service (str "ws://127.0.0.1:" (:port server))
                  :handler (fn [event]
                             (swap! events conj event)
-                            (when (= :gap (:kind event)) (deliver saw-gap event)))
-                 :on-error (fn [err]
-                             (swap! errors conj err)
-                             (when (= "SeqRegression" (:error err))
-                               (deliver saw-regression err)))})]
+                            (deliver done true))
+                 :on-error (fn [err] (swap! errors conj err))})]
     (try
-      (let [gap (deref saw-gap 5000 ::timeout)]
-        (is (= {:kind :gap :seq 5 :prev-seq 1} gap)))
-      (let [regression (deref saw-regression 5000 ::timeout)]
-        (is (= 3 (:seq regression))))
-      ;; The regressed message was skipped.
-      (is (= [1 5] (keep :seq (remove #(= :gap (:kind %)) @events))))
+      (is (true? (deref done 5000 ::timeout)))
+      ;; the unknown message was skipped with an on-error; the stream continued
+      (is (= [2] (map :seq @events)))
+      (is (some #(= "FirehoseParseError" (:error %)) @errors))
+      (finally
+        (firehose/stop! handle)
+        (ws-server/stop! server)))))
+
+(deftest consume-verify-failure-drops-commit-test
+  (let [message (signed-commit-message :seq 9)
+        follow-up (identity-message :seq 10)
+        server (replay-server
+                (fn [n] (when (= 1 n)
+                          (map message->frame-bytes [message follow-up]))))
+        other (util/ok! (util/result-of (crypto/generate "ES256K")))
+        key-calls (atom [])
+        events (atom [])
+        errors (atom [])
+        done (promise)
+        handle (firehose/consume
+                {:service (str "ws://127.0.0.1:" (:port server))
+                 :handler (fn [event]
+                            (swap! events conj event)
+                            (when (= 10 (:seq event)) (deliver done true)))
+                 :verify? true
+                 :resolve-key-fn (fn [_did force? cb]
+                                   (swap! key-calls conj force?)
+                                   (cb (crypto/did other)))
+                 :on-error (fn [err] (swap! errors conj err))})]
+    (try
+      (is (true? (deref done 10000 ::timeout)))
+      ;; the unverifiable commit was dropped with on-error (after one forced
+      ;; key-refresh retry); later events still flow
+      (is (= [:identity] (map :kind @events)))
+      (is (some #(= "RepoVerification" (:error %)) @errors))
+      (is (= [false true] @key-calls))
       (finally
         (firehose/stop! handle)
         (ws-server/stop! server)))))

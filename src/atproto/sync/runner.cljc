@@ -1,10 +1,17 @@
 (ns atproto.sync.runner
   "Partitioned in-order event processing with consecutive-seq cursor commit.
   Port of @atproto/sync MemoryRunner + ConsecutiveList."
-  (:require [atproto.runtime.cast :as cast]
+  (:require [clojure.spec.alpha :as s]
+            [atproto.runtime.cast :as cast]
             [atproto.sync.cursor :as cursor]))
 
 #?(:clj (set! *warn-on-reflection* true))
+
+(s/def ::concurrency (s/nilable pos-int?))
+(s/def ::cursor-store cursor/cursor-store?)
+(s/def ::start-cursor (s/nilable int?))
+(s/def ::options
+  (s/keys :opt-un [::concurrency ::cursor-store ::start-cursor]))
 
 ;;; ConsecutiveList
 ;;;
@@ -202,7 +209,11 @@
     :cursor-store  atproto.sync.cursor/CursorStore updated with the latest
                    *consecutive* completed seq
     :start-cursor  initial cursor"
-  [& {:keys [concurrency cursor-store start-cursor]}]
+  [& {:keys [concurrency cursor-store start-cursor] :as options}]
+  (when-not (s/valid? ::options (or options {}))
+    (throw (ex-info "Invalid runner options."
+                    {:error "InvalidConfig"
+                     :message (s/explain-str ::options options)})))
   {:concurrency concurrency
    :store cursor-store
    :state (atom {:clist (consecutive-list)

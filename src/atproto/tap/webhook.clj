@@ -4,12 +4,19 @@
   Tap POSTs one wire event per request; a 200 acks it, anything else makes
   Tap retry (at-least-once, like the channel). The equivalent of the
   @atproto/tap README express example (commit b9ef557)."
-  (:require [atproto.runtime.json :as json]
+  (:require [clojure.spec.alpha :as s]
+            [atproto.runtime.json :as json]
             [atproto.runtime.cast :as cast]
             [atproto.tap.auth :as auth]
             [atproto.tap.events :as events]))
 
 (set! *warn-on-reflection* true)
+
+(s/def ::admin-password string?)
+(s/def ::handler fn?)
+(s/def ::path string?)
+(s/def ::config (s/keys :req-un [::admin-password ::handler]
+                        :opt-un [::path]))
 
 (defn- json-response
   [status body]
@@ -33,7 +40,11 @@
   Responses are JSON: 200 {} on success, 405 off-method, 401 on bad auth,
   400 on unparseable/invalid events, 500 on handler errors (the exception
   message is never leaked; it is cast as an alert)."
-  [{:keys [admin-password handler path] :or {path "/tap"}}]
+  [{:keys [admin-password handler path] :or {path "/tap"} :as config}]
+  (when-not (s/valid? ::config config)
+    (throw (ex-info "Invalid Tap webhook config."
+                    {:error "InvalidConfig"
+                     :message (s/explain-str ::config config)})))
   (fn [req]
     (when (= path (:uri req))
       (cond

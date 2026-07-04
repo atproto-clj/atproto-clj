@@ -14,7 +14,8 @@
 
     {:kind :create :live false :did ... :collection ... :rkey ...
      :record {...} :cid <cid> :uri \"at://did/coll/rkey\"}"
-  (:require [clojure.string :as str]
+  (:require [clojure.spec.alpha :as s]
+            [clojure.string :as str]
             [atproto.at-uri :as at-uri]
             [atproto.data :as data]
             [atproto.identity :as identity]
@@ -26,13 +27,42 @@
 
 #?(:clj (set! *warn-on-reflection* true))
 
+(s/def ::repo string?)
+(s/def ::collection string?)
+(s/def ::handler fn?)
+(s/def ::limit pos-int?)
+(s/def ::max-pages pos-int?)
+(s/def ::filter-collections (s/coll-of string?))
+(s/def ::did-key string?)
+(s/def ::walk-config
+  (s/keys :req-un [::repo ::collection ::handler] :opt-un [::limit ::max-pages]))
+(s/def ::repo-config
+  (s/keys :req-un [::repo ::handler]
+          :opt-un [::filter-collections ::limit ::max-pages]))
+(s/def ::get-repo-config
+  (s/keys :req-un [::repo ::handler] :opt-un [::did-key]))
+
+(s/def ::kind #{:create})
+(s/def ::live false?)
+(s/def ::did string?)
+(s/def ::rkey (s/nilable string?))
+(s/def ::uri (s/nilable string?))
+;; The synthetic backfill event shape handed to handlers.
+(s/def ::event
+  (s/keys :req-un [::kind ::live ::did ::collection ::rkey ::uri]))
+
 (defn- async-opts [opts]
   (select-keys opts [:channel :callback :promise]))
+
+(defn- invalid-request
+  [spec m]
+  {:error "InvalidRequest"
+   :message (s/explain-str spec m)})
 
 (defn- record->event
   [did collection {:keys [uri cid value]}]
   (let [rkey (or (:rkey (at-uri/parse uri))
-                 (last (str/split (str uri) #"/")))]
+                 (when uri (last (str/split uri #"/"))))]
     {:kind :create
      :live false
      :did did
@@ -64,11 +94,10 @@
   optional :max-pages caps pagination. Async; the final callback gets
   {:count n} or {:error ...} (a throwing handler aborts the walk with
   {:error \"BackfillHandlerError\"})."
-  [xrpc-client {:keys [repo collection limit handler max-pages]} & {:as opts}]
+  [xrpc-client {:keys [repo collection limit handler max-pages] :as m} & {:as opts}]
   (let [[cb val] (i/platform-async (async-opts opts))]
-    (if-not (and repo collection (fn? handler))
-      (cb {:error "InvalidRequest"
-           :message "list-records-walk requires :repo, :collection and :handler."})
+    (if-not (s/valid? ::walk-config m)
+      (cb (invalid-request ::walk-config m))
       (xrpc/fetch-pages
        xrpc-client
        {:nsid "com.atproto.repo.listRecords"
@@ -107,9 +136,8 @@
   {:error ...}."
   [xrpc-client {:keys [repo filter-collections handler] :as m} & {:as opts}]
   (let [[cb val] (i/platform-async (async-opts opts))]
-    (if-not (and repo (fn? handler))
-      (cb {:error "InvalidRequest"
-           :message "backfill-repo requires :repo and :handler."})
+    (if-not (s/valid? ::repo-config m)
+      (cb (invalid-request ::repo-config m))
       (xrpc/query
        xrpc-client
        {:nsid "com.atproto.repo.describeRepo"
@@ -178,13 +206,15 @@
 
      Async; the final callback gets {:count n :did did} or {:error ...}
      ({:error \"RepoVerification\"} when the CAR fails verification)."
-     [xrpc-client {:keys [repo handler did-key]} & {:as opts}]
+     [xrpc-client {:keys [repo handler did-key] :as m} & {:as opts}]
      (let [[cb val] (i/platform-async (async-opts opts))
            verify-records (requiring-resolve 'atproto.repo.sync/verify-records)
            service (:service xrpc-client)]
-       (if-not (and repo (fn? handler) service)
-         (cb {:error "InvalidRequest"
-              :message "get-repo-walk requires :repo, :handler, and a client with :service."})
+       (if-not (and (s/valid? ::get-repo-config m) service)
+         (cb (if service
+               (invalid-request ::get-repo-config m)
+               {:error "InvalidRequest"
+                :message "get-repo-walk requires a client with :service."}))
          (identity/resolve-identity
           repo
           :callback

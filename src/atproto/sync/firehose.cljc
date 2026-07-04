@@ -140,7 +140,10 @@
         (let [block-map (:block-map car)]
           (reduce
            (fn [{:keys [events] :as acc} {:keys [action path cid]}]
-             (let [[collection rkey] (str/split path #"/" 2)]
+             ;; Reference semantics: destructure the first two path segments
+             ;; (a malformed multi-slash path yields the second segment as
+             ;; rkey, not the whole remainder).
+             (let [[collection rkey] (str/split path #"/")]
                (if-not (and collection rkey (match-collection collection))
                  acc
                  (let [base {:seq seq
@@ -149,7 +152,7 @@
                              :commit commit
                              :rev rev
                              :since since
-                             :uri (str "at://" repo "/" path)
+                             :uri (str "at://" repo "/" collection "/" rkey)
                              :collection collection
                              :rkey rkey
                              :blocks block-map}]
@@ -164,19 +167,20 @@
                           (parse-error (str "Missing record block " (data/format-cid cid)
                                             " for " path " in commit CAR.")
                                        {:seq seq :did repo}))
-                         (let [record (try
-                                        (cbor/decode record-bytes)
-                                        (catch #?(:clj Exception :cljs :default) e
-                                          {::undecodable (ex-message e)}))]
-                           (if (::undecodable record)
+                         (let [decoded (try
+                                         {:record (cbor/decode record-bytes)}
+                                         (catch #?(:clj Exception :cljs :default) e
+                                           {:undecodable (or (ex-message e)
+                                                             (str (type e)))}))]
+                           (if (contains? decoded :undecodable)
                              (reduced
                               (parse-error (str "Undecodable record block for " path ": "
-                                                (::undecodable record))
+                                                (:undecodable decoded))
                                            {:seq seq :did repo}))
                              (update acc :events conj
                                      (assoc base
                                             :kind (if (= action "create") :create :update)
-                                            :record record
+                                            :record (:record decoded)
                                             :cid cid))))))
 
                      (reduced
@@ -418,10 +422,38 @@
                         kind))))))
 
 #?(:clj
+   (defn- write-cursor!
+     "Serialized, coalescing cursor write: at most one set-cursor in flight;
+     a newer value arriving mid-write replaces any pending one, so an async
+     CursorStore never sees an older cursor after a newer one."
+     [{:keys [cursor-store on-error cursor-write-state]} seq]
+     (letfn [(write! [s]
+               (cursor/set-cursor
+                cursor-store s
+                (fn [{:keys [error] :as resp}]
+                  (when (and error on-error)
+                    (on-error resp))
+                  (let [[{:keys [pending]} _]
+                        (swap-vals! cursor-write-state
+                                    (fn [{:keys [pending]}]
+                                      {:writing? (some? pending) :pending nil}))]
+                    (when pending (write! pending))))))]
+       (let [[{:keys [writing?]} _]
+             (swap-vals! cursor-write-state
+                         (fn [{:keys [writing?] :as state}]
+                           (if writing?
+                             (assoc state :pending seq)
+                             (assoc state :writing? true))))]
+         (when-not writing?
+           (write! seq))))))
+
+#?(:clj
    (defn- dispatch-event!
      "Deliver one event through the runner (did-carrying events) or directly
-     to the handler; advance the cursor store after handler completion."
-     [{:keys [handler on-error runner cursor-store]} event]
+     to the handler; advance the cursor store after handler completion.
+     :gap events never advance the cursor — their :seq belongs to a message
+     whose real events have not been handled yet."
+     [{:keys [handler on-error runner cursor-store] :as ctx} event]
      (let [seq (:seq event)
            did (:did event)
            run-handler
@@ -439,12 +471,8 @@
          (runner/track-event runner did seq run-handler)
          (run-handler
           (fn [_]
-            (when (and cursor-store seq)
-              (cursor/set-cursor
-               cursor-store seq
-               (fn [{:keys [error] :as resp}]
-                 (when (and error on-error)
-                   (on-error (assoc resp :event event))))))))))))
+            (when (and cursor-store seq (not= :gap (:kind event)))
+              (write-cursor! ctx seq))))))))
 
 #?(:clj
    (defn- process-frame!
@@ -545,7 +573,10 @@
     :runner            an atproto.sync.runner runner for partitioned
                        concurrency; the handler is passed to the runner and
                        the runner becomes the cursor source. Mutually
-                       exclusive with :cursor-store.
+                       exclusive with :cursor-store. Note: :gap/:info
+                       events carry no DID, bypass the runner, and are
+                       delivered inline on the socket thread — with a
+                       runner the handler must be thread-safe.
     :on-error          (fn [{:keys [error message event exception]}])
                        non-fatal: FirehoseParseError, FirehoseHandlerError,
                        InvalidFrame, InvalidMessage, SeqRegression,
@@ -567,6 +598,9 @@
     :resolve-identity? enrich :identity events with the resolved DID doc
                        and a bidirectionally verified handle (an
                        unverifiable handle is omitted). Default false.
+                       Resolution (like :verify? verification) runs on the
+                       delivery thread, so these modes trade throughput for
+                       ordering guarantees.
     :verify?           verify commit signatures + inclusion proofs via the
                        WS-04 contract, with one forced key-refresh retry;
                        failing commits are dropped through on-error.
@@ -608,6 +642,7 @@
              ctx {:handler handler
                   :runner runner
                   :cursor-store cursor-store
+                  :cursor-write-state (atom {:writing? false :pending nil})
                   :on-error on-error
                   :last-seq (volatile! nil)
                   :validate? validate?

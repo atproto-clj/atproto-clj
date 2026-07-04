@@ -24,6 +24,7 @@
   bluesky-social/jetstream repository; :compress? true returns
   {:error \"UnsupportedOption\"} (WS-05 planning doc, risk 3)."
   (:require [charred.api :as json]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.core.async :as a]
             [atproto.data :as data]
@@ -36,6 +37,31 @@
 (set! *warn-on-reflection* true)
 
 (def default-host "jetstream1.us-east.bsky.network")
+
+(s/def ::host string?)
+(s/def ::cursor int?)
+(s/def ::wanted-collections (s/coll-of string?))
+(s/def ::cursor-store cursor/cursor-store?)
+(s/def ::typed? boolean?)
+(s/def ::compress? boolean?)
+(s/def ::close? boolean?)
+(s/def ::ws-opts map?)
+(s/def ::consume-options
+  (s/keys :opt-un [::host ::cursor ::wanted-collections ::cursor-store
+                   ::typed? ::compress? ::close? ::ws-opts]))
+
+(s/def ::kind #{:create :update :delete :identity :account :unknown})
+(s/def ::did string?)
+(s/def ::time-us (s/nilable int?))
+(s/def ::typed-event
+  (s/and (s/keys :req-un [::kind])
+         (fn [{:keys [kind] :as event}]
+           (case kind
+             (:create :update) (and (:did event) (:collection event)
+                                    (:rkey event) (contains? event :record))
+             :delete (and (:did event) (:collection event) (:rkey event))
+             (:identity :account) (some? (:did event))
+             :unknown (contains? event :raw)))))
 
 (defn- base-url
   "Jetstream endpoint for a :host option; bare hostnames get wss://, and a
@@ -114,6 +140,18 @@
 
     {:kind :unknown :raw event}))
 
+(defn- put-event!
+  "Blocking put that periodically re-checks for shutdown, so a consumer
+  that stopped taking (with :close? false) cannot park the listener thread
+  forever. Returns true when the event was accepted."
+  [state ch event]
+  (loop []
+    (if (:stopped? @state)
+      false
+      (let [res (a/alt!! [[ch event]] ([accepted?] (boolean accepted?))
+                         (a/timeout 200) ::retry)]
+        (if (= ::retry res) (recur) res)))))
+
 (defn- cursor-url-fn
   "url-fn re-invoked on every (re)connect. A cursor derived from processed
   events (the store, or the in-memory last event) is rewound by 1µs so no
@@ -163,7 +201,12 @@
          :or {host default-host
               control-ch (a/chan)
               close? true}
-         :as opts}]
+         :as options}]
+  (when-not (s/valid? ::consume-options (dissoc options :control-ch :max-retries))
+    (throw (ex-info "Invalid Jetstream options."
+                    {:error "InvalidConfig"
+                     :message (s/explain-str ::consume-options
+                                             (dissoc options :control-ch :max-retries))})))
   (if compress?
     {:error "UnsupportedOption"
      :message "Jetstream zstd mode is not implemented; consume plain JSON instead."}
@@ -182,7 +225,7 @@
                 (when (map? event)
                   ;; Blocking put: backpressures the socket, which requests
                   ;; one message at a time.
-                  (when (a/>!! ch (if typed? (typed-event event) event))
+                  (when (put-event! state ch (if typed? (typed-event event) event))
                     (when-let [us (:time_us event)]
                       (vreset! last-event-cursor us)
                       (when cursor-store
