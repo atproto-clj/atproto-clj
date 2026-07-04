@@ -259,23 +259,29 @@
                    :expires-in 300 :dpop-nonce next}
   Error: OAuth error map with :status (+ :dpop-nonce on use_dpop_nonce)."
   [{:keys [stores] :as provider} {:keys [params] :as request} & {:as opts}]
-  (let [[cb val] (i/platform-async (async-opts opts))]
-    (resolve-and-authenticate-client
-     provider params
-     (fn [{:keys [error] :as resolved}]
-       (if error
-         (cb resolved)
-         (let [proof (check-dpop provider request)]
-           (if (:error proof)
-             (cb proof)
-             (let [data (validate-par-params resolved params (:jkt proof))]
-               (if (:error data)
-                 (cb data)
-                 (let [request-id (str "req-" (crypto/generate-nonce 24))]
-                   (store/create-request! (:request-store stores) request-id data)
-                   (cb {:request-uri (request-id->uri request-id)
-                        :expires-in par-request-ttl
-                        :dpop-nonce (next-dpop-nonce provider)})))))))))
+  (let [[cb val] (i/platform-async (async-opts opts))
+        ;; Check the DPoP proof (incl. the nonce challenge) before
+        ;; authenticating the client: a confidential client's assertion
+        ;; carries a single-use jti, and the nonce-less first request is
+        ;; always bounced with use_dpop_nonce, so consuming the jti here
+        ;; would break the legitimate retry that carries the same
+        ;; assertion.
+        proof (check-dpop provider request)]
+    (if (:error proof)
+      (cb proof)
+      (resolve-and-authenticate-client
+       provider params
+       (fn [{:keys [error] :as resolved}]
+         (if error
+           (cb resolved)
+           (let [data (validate-par-params resolved params (:jkt proof))]
+             (if (:error data)
+               (cb data)
+               (let [request-id (str "req-" (crypto/generate-nonce 24))]
+                 (store/create-request! (:request-store stores) request-id data)
+                 (cb {:request-uri (request-id->uri request-id)
+                      :expires-in par-request-ttl
+                      :dpop-nonce (next-dpop-nonce provider)}))))))))
     val))
 
 ;; -----------------------------------------------------------------------------
@@ -595,25 +601,29 @@
   :refresh_token, :expires_in, :scope, :sub, :dpop-nonce). Error: OAuth
   error map + :status."
   [provider {:keys [params] :as request} & {:as opts}]
-  (let [[cb val] (i/platform-async (async-opts opts))]
-    (resolve-and-authenticate-client
-     provider params
-     (fn [{:keys [error] :as resolved}]
-       (if error
-         (cb resolved)
-         (let [proof (check-dpop provider request)]
-           (if (:error proof)
-             (cb proof)
-             (case (:grant_type params)
-               "authorization_code"
-               (handle-code-grant provider resolved params proof cb)
+  (let [[cb val] (i/platform-async (async-opts opts))
+        ;; DPoP (incl. the nonce challenge) before client auth, so the
+        ;; nonce-less first request never consumes a confidential
+        ;; client's single-use assertion jti (see
+        ;; pushed-authorization-request).
+        proof (check-dpop provider request)]
+    (if (:error proof)
+      (cb proof)
+      (resolve-and-authenticate-client
+       provider params
+       (fn [{:keys [error] :as resolved}]
+         (if error
+           (cb resolved)
+           (case (:grant_type params)
+             "authorization_code"
+             (handle-code-grant provider resolved params proof cb)
 
-               "refresh_token"
-               (handle-refresh-grant provider resolved params proof cb)
+             "refresh_token"
+             (handle-refresh-grant provider resolved params proof cb)
 
-               (cb (oauth-error "unsupported_grant_type"
-                                (str "Unsupported grant_type: "
-                                     (pr-str (:grant_type params)))))))))))
+             (cb (oauth-error "unsupported_grant_type"
+                              (str "Unsupported grant_type: "
+                                   (pr-str (:grant_type params))))))))))
     val))
 
 ;; -----------------------------------------------------------------------------

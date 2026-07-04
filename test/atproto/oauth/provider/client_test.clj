@@ -89,7 +89,22 @@
              (check (assoc valid-metadata :token_endpoint_auth_method "private_key_jwt"))))
       (is (nil? (check (assoc valid-metadata
                               :token_endpoint_auth_method "private_key_jwt"
-                              :jwks {:keys []})))))))
+                              :jwks {:keys []})))))
+    (testing "jwks and jwks_uri are mutually exclusive"
+      (is (= "InvalidClientMetadata"
+             (check (assoc valid-metadata
+                           :token_endpoint_auth_method "private_key_jwt"
+                           :jwks {:keys []}
+                           :jwks_uri "https://app.test/jwks.json")))))
+    (testing "token_endpoint_auth_signing_alg must be ES256 when present"
+      (let [confidential (assoc valid-metadata
+                                :token_endpoint_auth_method "private_key_jwt"
+                                :jwks {:keys []})]
+        (is (nil? (check (assoc confidential :token_endpoint_auth_signing_alg "ES256"))))
+        (is (= "InvalidClientMetadata"
+               (check (assoc confidential :token_endpoint_auth_signing_alg "RS256"))))
+        (is (= "InvalidClientMetadata"
+               (check (assoc confidential :token_endpoint_auth_signing_alg "none"))))))))
 
 (deftest loopback-client-test
   (testing "bare loopback id synthesizes default metadata"
@@ -219,4 +234,57 @@
                                       :client-assertion forged}))))))
     (testing "missing assertion"
       (is (= "invalid_client"
-             (:error (authenticate {})))))))
+             (:error (authenticate {})))))
+    (testing "assertions must be signed with ES256 (atproto profile)"
+      (let [rsa-jwk (jwt/generate-jwk {:alg "RS256" :kid "rsa-key"})
+            rsa-client (assoc client-entry :jwks {:keys [(jwt/public-jwk rsa-jwk)]})
+            rsa-assertion (jwt/generate rsa-jwk {:alg "RS256" :kid "rsa-key"}
+                                        {:iss client-id :sub client-id :aud issuer
+                                         :jti (crypto/generate-nonce 16)
+                                         :iat (crypto/now) :exp (+ (crypto/now) 60)})
+            result (deref (client/authenticate-client
+                           (client/registry) rsa-client
+                           {:client-assertion-type client/client-assertion-jwt-bearer
+                            :client-assertion rsa-assertion}
+                           :issuer issuer
+                           :replay-store replay-store)
+                          1000 ::timeout)]
+        (is (= "invalid_client" (:error result)))
+        (is (re-find #"ES256" (:message result)))))
+    (testing "small clock skew is tolerated (assertion iat slightly ahead)"
+      (is (= {:method "private_key_jwt"}
+             (authenticate {:client-assertion-type client/client-assertion-jwt-bearer
+                            :client-assertion (assertion {:iat (+ (crypto/now) 15)})}))))))
+
+(deftest assertion-jti-tracked-for-full-validity-test
+  ;; spec: "Authorization Servers must ensure uniqueness of jti values
+  ;; over the full token validity time period" — a replay must still be
+  ;; rejected after the old fixed 300s tracking window has passed, as
+  ;; long as the assertion itself has not expired
+  (let [jwk (jwt/generate-jwk {:alg "ES256" :kid "client-key"})
+        client-entry {:client-id client-id
+                      :metadata (assoc valid-metadata
+                                       :token_endpoint_auth_method "private_key_jwt"
+                                       :jwks {:keys [(jwt/public-jwk jwk)]})
+                      :jwks {:keys [(jwt/public-jwk jwk)]}}
+        replay-store (store/memory-replay-store)
+        long-lived (jwt/generate jwk {:alg "ES256" :kid "client-key"}
+                                 {:iss client-id :sub client-id :aud issuer
+                                  :jti "long-lived-jti"
+                                  :iat (crypto/now)
+                                  :exp (+ (crypto/now) 3600)})
+        authenticate (fn []
+                       (deref (client/authenticate-client
+                               (client/registry) client-entry
+                               {:client-assertion-type client/client-assertion-jwt-bearer
+                                :client-assertion long-lived}
+                               :issuer issuer
+                               :replay-store replay-store)
+                              1000 ::timeout))]
+    (is (= {:method "private_key_jwt"} (authenticate)))
+    (testing "replay 400s later (past the old 300s window) is still rejected"
+      (let [real-now crypto/now]
+        (with-redefs [crypto/now #(+ (real-now) 400)]
+          (let [result (authenticate)]
+            (is (= "invalid_client" (:error result)))
+            (is (re-find #"already used" (:message result)))))))))

@@ -114,6 +114,7 @@
   Returns the metadata (normalized) or {:error \"InvalidClientMetadata\"}."
   [client-id {:keys [redirect_uris grant_types response_types scope
                      application_type token_endpoint_auth_method
+                     token_endpoint_auth_signing_alg
                      dpop_bound_access_tokens jwks jwks_uri]
               :as metadata}]
   (let [application-type (or application_type "web")
@@ -143,6 +144,15 @@
      (when (and (= "private_key_jwt" auth-method)
                 (not (or (map? jwks) (string? jwks_uri))))
        (invalid-metadata "private_key_jwt clients must provide jwks or jwks_uri."))
+     ;; spec: "Either this field or the jwks_uri field must be provided
+     ;; for confidential clients, but not both."
+     (when (and (map? jwks) (string? jwks_uri))
+       (invalid-metadata "jwks and jwks_uri are mutually exclusive."))
+     (when (and (= "private_key_jwt" auth-method)
+                (some? token_endpoint_auth_signing_alg)
+                (not= "ES256" token_endpoint_auth_signing_alg))
+       (invalid-metadata (str "token_endpoint_auth_signing_alg must be ES256, got "
+                              (pr-str token_endpoint_auth_signing_alg) ".")))
      (assoc metadata
             :application_type application-type
             :token_endpoint_auth_method auth-method))))
@@ -273,6 +283,10 @@
   [message]
   {:error "invalid_client" :message message :status 401})
 
+;; Assertions must be rejected past this lifetime even if their exp is
+;; further out, and jti replay records never need to outlive it.
+(def max-assertion-lifetime-s 3600)
+
 (defn- verify-assertion-claims
   [{:keys [client-id]} {:keys [iss sub aud jti exp]} issuer replay-store]
   (cond
@@ -292,8 +306,12 @@
     (not (and (string? jti) (seq jti)))
     (invalid-client "client_assertion requires a jti claim.")
 
+    ;; spec: "Authorization Servers must ensure uniqueness of jti values
+    ;; over the full token validity time period" — track the jti until
+    ;; the assertion itself expires (bounded by the max lifetime)
     (not (store/unique? replay-store "client-assertion" jti
-                        (+ (crypto/now) 300)))
+                        (min (long exp)
+                             (+ (crypto/now) max-assertion-lifetime-s))))
     (invalid-client "client_assertion jti was already used.")
 
     :else nil))
@@ -330,10 +348,20 @@
 
         :else
         #?(:clj
-           (let [verified @(jwt/verify client-assertion {:jwks jwks})]
-             (if (:error verified)
+           ;; leeway: the spec says assertions "generated less than a
+           ;; minute ago" must not be rejected, so tolerate clock skew
+           (let [verified @(jwt/verify client-assertion {:jwks jwks} :leeway 30)]
+             (cond
+               (:error verified)
                (cb (invalid-client (str "Invalid client_assertion: "
                                         (or (:message verified) (:error verified)))))
+
+               ;; atproto profile: ES256 is the required signing system
+               (not= "ES256" (get-in verified [:header :alg]))
+               (cb (invalid-client (str "client_assertion alg must be ES256, got "
+                                        (pr-str (get-in verified [:header :alg])) ".")))
+
+               :else
                (if-let [err (verify-assertion-claims client (:claims verified)
                                                      issuer replay-store)]
                  (cb err)

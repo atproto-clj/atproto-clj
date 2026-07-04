@@ -52,6 +52,16 @@
 (defn- test-keyset []
   {:keys [(jwt/generate-jwk {:alg "ES256" :kid "provider-1"})]})
 
+;; A confidential client: a private ES256 signing key plus the published
+;; metadata document advertising its public JWK and private_key_jwt auth.
+(defn- confidential-client []
+  (let [jwk (jwt/generate-jwk {:alg "ES256" :kid "client-key"})]
+    {:client-keys [(json/write-str jwk)]
+     :metadata (assoc client-metadata
+                      :token_endpoint_auth_method "private_key_jwt"
+                      :token_endpoint_auth_signing_alg "ES256"
+                      :jwks {:keys [(jwt/public-jwk jwk)]})}))
+
 ;; -----------------------------------------------------------------------------
 ;; A Ring adapter that reads http-kit's raw request into the shape the
 ;; provider routes expect (query-string parsing + body InputStream), and
@@ -59,7 +69,7 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- make-app
-  [prov issuer]
+  [prov issuer served-metadata]
   (let [oauth-routes (provider-ring/routes prov :resource issuer)]
     (fn [{:keys [uri] :as req}]
       (or (oauth-routes req)
@@ -67,7 +77,7 @@
             "/client-metadata.json"
             {:status 200
              :headers {"content-type" "application/json"}
-             :body (json/write-str client-metadata)}
+             :body (json/write-str served-metadata)}
             {:status 404 :headers {} :body "not found"})))))
 
 (defn- fake-identity-http
@@ -75,7 +85,7 @@
   canned did document and the client metadata document from its client_id
   URL; send everything else (the provider endpoints on 127.0.0.1) to the
   real http client."
-  [issuer real-handle]
+  [issuer real-handle served-metadata]
   (fn [{:keys [url] :as request} cb]
     (let [url (or url "")]
       (cond
@@ -87,7 +97,7 @@
         (str/includes? url "app.test/client-metadata.json")
         (cb {:status 200
              :headers {:content-type "application/json"}
-             :body (json/write-str client-metadata)})
+             :body (json/write-str served-metadata)})
 
         :else (real-handle request cb)))))
 
@@ -119,12 +129,17 @@
     (get-in accepted [:redirect :params])))
 
 (defn- run-conformance
-  [prov issuer]
-  (let [real-handle http/handle-request]
-    (with-redefs [http/handle-request (fake-identity-http issuer real-handle)]
-      (let [client (oauth-client/create
-                    {:client-metadata client-metadata
-                     :keys []})]
+  "Drive the full OAuth loop with the SDK's own client. client-opts
+  defaults to the public (token_endpoint_auth_method \"none\") client;
+  pass {:metadata .. :client-keys ..} from confidential-client to drive
+  a private_key_jwt confidential client instead."
+  ([prov issuer] (run-conformance prov issuer {:metadata client-metadata :client-keys []}))
+  ([prov issuer {:keys [metadata client-keys]}]
+   (let [real-handle http/handle-request]
+     (with-redefs [http/handle-request (fake-identity-http issuer real-handle metadata)]
+       (let [client (oauth-client/create
+                     {:client-metadata metadata
+                      :keys client-keys})]
         (testing "authorize -> PAR over real HTTP with DPoP nonce enforcement"
           (let [{:keys [authorization-url error] :as auth}
                 ;; drive with the DID so identity resolves via the faked
@@ -163,7 +178,7 @@
                     (let [result (deref (oauth-client/revoke client did) 8000 ::timeout)]
                       (is (= {:did did :revoked true} result))
                       (is (= "SessionNotFound"
-                             (:error (deref (oauth-client/restore client did) 2000 ::timeout)))))))))))))))
+                             (:error (deref (oauth-client/restore client did) 2000 ::timeout))))))))))))))))
 
 (deftest conformance-memory-stores-test
   (let [srv (httpkit/run-server (fn [_] {:status 503}) {:port 0 :legacy-return-value? false})
@@ -175,11 +190,33 @@
                                  :keyset (test-keyset)
                                  :stores (store/memory-stores
                                           :accounts [{:sub did :handle handle :password password}])})
-          app (make-app prov issuer)
+          app (make-app prov issuer client-metadata)
           server (httpkit/run-server app {:port port :legacy-return-value? false})]
       (is (nil? (:error prov)))
       (try
         (run-conformance prov issuer)
+        (finally
+          (httpkit/server-stop! server))))))
+
+(deftest conformance-confidential-client-test
+  ;; a confidential client (token_endpoint_auth_method private_key_jwt)
+  ;; completes the same PAR -> token -> refresh -> revoke loop, signing a
+  ;; client assertion (with iss/sub/aud/jti/iat/exp) on every PAR/token
+  ;; request; the provider verifies it against the client's published JWKS
+  (let [srv (httpkit/run-server (fn [_] {:status 503}) {:port 0 :legacy-return-value? false})
+        port (httpkit/server-port srv)
+        issuer (str "http://127.0.0.1:" port)
+        {:keys [metadata client-keys]} (confidential-client)]
+    (httpkit/server-stop! srv)
+    (let [prov (provider/create {:issuer issuer
+                                 :keyset (test-keyset)
+                                 :stores (store/memory-stores
+                                          :accounts [{:sub did :handle handle :password password}])})
+          app (make-app prov issuer metadata)
+          server (httpkit/run-server app {:port port :legacy-return-value? false})]
+      (is (nil? (:error prov)))
+      (try
+        (run-conformance prov issuer {:metadata metadata :client-keys client-keys})
         (finally
           (httpkit/server-stop! server))))))
 
@@ -202,7 +239,7 @@
                         :get-account (fn [sub] (some-> (get accounts sub) (dissoc :password)))}})]
     (httpkit/server-stop! srv)
     (let [prov (provider/create {:issuer issuer :keyset (test-keyset) :stores stores})
-          server (httpkit/run-server (make-app prov issuer) {:port port :legacy-return-value? false})]
+          server (httpkit/run-server (make-app prov issuer client-metadata) {:port port :legacy-return-value? false})]
       (is (nil? (:error prov)))
       (try
         (run-conformance prov issuer)

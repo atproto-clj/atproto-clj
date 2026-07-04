@@ -229,7 +229,8 @@
 (defmethod client-auth "private_key_jwt"
   [{:keys [jwks] :as client} issuer]
   (let [jwk (first (jwt/query-jwks jwks {:alg default-alg}))
-        {:keys [client_id]} (:client-metadata client)]
+        {:keys [client_id]} (:client-metadata client)
+        now (crypto/now)]
     {:client_id client_id
      :client_assertion_type "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
      :client_assertion (jwt/generate jwk
@@ -239,7 +240,11 @@
                                       :sub client_id
                                       :aud (:issuer issuer)
                                       :jti (crypto/generate-nonce 16)
-                                      :iat (crypto/now)})}))
+                                      :iat now
+                                      ;; exp is REQUIRED for JWT client
+                                      ;; assertions (RFC 7523 §3); jti is
+                                      ;; single-use so keep it short
+                                      :exp (+ now 60)})}))
 
 (defn- as-request
   "POST `params`, merged with this client's authentication payload, to one of
