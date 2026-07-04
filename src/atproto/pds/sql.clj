@@ -14,16 +14,28 @@
             [next.jdbc.result-set :as rs]
             [atproto.runtime.cast :as cast])
   (:import [java.sql Connection]
-           [java.time Instant]
+           [java.time Instant ZoneOffset]
+           [java.time.format DateTimeFormatter]
            [org.sqlite SQLiteErrorCode SQLiteException]))
 
 (set! *warn-on-reflection* true)
+
+(def ^:private iso-millis
+  (-> (DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+      (.withZone ZoneOffset/UTC)))
+
+(defn iso
+  "Fixed-width ISO-8601 UTC datetime string with milliseconds for an
+  Instant (JS Date.toISOString parity, so stored timestamps compare
+  lexicographically)."
+  [^Instant instant]
+  (.format ^DateTimeFormatter iso-millis instant))
 
 (defn now-iso
   "The current time as an ISO-8601 UTC datetime string (reference
   ISO timestamp convention for indexedAt/sequencedAt columns)."
   []
-  (str (Instant/now)))
+  (iso (Instant/now)))
 
 (defn connect
   "Open a SQLite connection to db-path with the SDK pragmas applied:
