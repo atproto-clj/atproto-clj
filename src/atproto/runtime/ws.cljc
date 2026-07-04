@@ -77,14 +77,17 @@
      to conn-ch; complete messages are handed to on-message directly on the
      listener thread (one message of demand at a time, requested only after
      the handler returns, for natural backpressure)."
-     [conn-ch on-message]
+     [conn-ch on-message activity]
      (let [sb (StringBuilder.)
-           bos (ByteArrayOutputStream.)]
+           bos (ByteArrayOutputStream.)
+           now #?(:clj #(System/currentTimeMillis) :cljs #(js/Date.now))]
        (reify WebSocket$Listener
          (onOpen [_ ws]
+           (vreset! activity (now))
            (a/put! conn-ch [:open ws])
            (.request ws 1))
          (onText [_ ws chars last?]
+           (vreset! activity (now))
            (.append sb chars)
            (when last?
              (let [msg (str sb)]
@@ -93,6 +96,7 @@
            (.request ws 1)
            nil)
          (onBinary [_ ws buf last?]
+           (vreset! activity (now))
            (let [^bytes chunk (buffer->bytes buf)]
              (.write bos chunk 0 (alength chunk)))
            (when last?
@@ -102,6 +106,7 @@
            (.request ws 1)
            nil)
          (onPong [_ ws _]
+           (vreset! activity (now))
            (a/put! conn-ch [:pong])
            (.request ws 1)
            nil)
@@ -151,7 +156,7 @@
 #?(:clj
    (defn- open-socket!
      "Start a connection attempt; lifecycle events arrive on conn-ch."
-     [^HttpClient client url headers conn-ch on-message]
+     [^HttpClient client url headers conn-ch on-message activity]
      (let [builder (reduce-kv (fn [^WebSocket$Builder b k v]
                                 (.header b (name k) (str v)))
                               (-> (.newWebSocketBuilder client)
@@ -159,7 +164,7 @@
                               (or headers {}))
            fut (.buildAsync ^WebSocket$Builder builder
                             (URI/create url)
-                            (connection-listener conn-ch on-message))]
+                            (connection-listener conn-ch on-message activity))]
        (.handle ^CompletableFuture fut
                 (reify BiFunction
                   (apply [_ _ err]
@@ -194,7 +199,7 @@
    (defn- babysit-connection
      "Wait on one connection until it ends. Yields (as the go block's value)
      {:opened? bool :outcome :retry|:close|:fatal|:shutdown, ...}."
-     [{:keys [state config]} conn-ch connected-before?]
+     [{:keys [state config]} conn-ch activity connected-before?]
      (let [{:keys [on-error on-reconnect heartbeat-interval-ms]
             :or {heartbeat-interval-ms default-heartbeat-interval-ms}} config]
        (a/go-loop [ws nil
@@ -203,8 +208,13 @@
          (let [hb (when ws (a/timeout heartbeat-interval-ms))
                [v port] (a/alts! (if hb [conn-ch hb] [conn-ch]))]
            (if (= port hb)
-             ;; Heartbeat tick: dead if the previous ping got no pong.
-             (if alive?
+             ;; Heartbeat tick: dead only when the previous ping got no pong
+             ;; AND nothing at all arrived in the meantime (inbound traffic
+             ;; proves liveness even while a slow consumer delays pong
+             ;; delivery, since listener callbacks are serialized).
+             (if (or alive?
+                     (< (- (System/currentTimeMillis) @activity)
+                        heartbeat-interval-ms))
                (do (ping! ws)
                    (recur ws false opened?))
                (do (abort! ws)
@@ -263,11 +273,12 @@
                                url
                                {:error "WSInvalidUrl"
                                 :message (str "url-fn returned " (pr-str url))}))
-                 (let [conn-ch (a/chan (a/sliding-buffer 16))]
+                 (let [conn-ch (a/chan (a/sliding-buffer 16))
+                       activity (volatile! 0)]
                    (swap! state assoc :conn-ch conn-ch)
-                   (open-socket! client url headers conn-ch on-message)
+                   (open-socket! client url headers conn-ch on-message activity)
                    (let [{:keys [opened? outcome error close]}
-                         (a/<! (babysit-connection handle conn-ch connected-before?))]
+                         (a/<! (babysit-connection handle conn-ch activity connected-before?))]
                      (swap! state assoc :connected? false :socket nil)
                      (case outcome
                        :shutdown (terminate! handle :close
