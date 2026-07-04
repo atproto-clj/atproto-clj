@@ -214,7 +214,11 @@
                                     :on-close (fn [info]
                                                 (when-not (:stopped? @state)
                                                   (reconnect info)))}))]
-                (swap! state assoc :ws handle))))]
+                (swap! state assoc :ws handle)
+                ;; shutdown may have raced the connect; close the socket it
+                ;; couldn't see.
+                (when (:stopped? @state)
+                  (ws/close! handle)))))]
       (connect!)
       (a/go-loop []
         (let [cmd (a/<! control-ch)]

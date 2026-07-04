@@ -649,7 +649,11 @@
                                                       (when on-error (on-error err))
                                                       (when fatal (reconnect err)))
                                           :on-close (fn [info] (reconnect info))}))]
-                   (swap! state assoc :ws ws-handle))))]
+                   (swap! state assoc :ws ws-handle)
+                   ;; stop! may have raced the connect; close the socket it
+                   ;; couldn't see.
+                   (when (:stopped? @state)
+                     (ws/close! ws-handle)))))]
          (connect!)
          {:state state :ctx ctx}))))
 
