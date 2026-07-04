@@ -201,6 +201,28 @@
            (catch Exception _ false))))))
 
 #?(:clj
+   (declare check-signature))
+
+#?(:clj
+   (defn- check-keyset-signature
+     "Try every JWKS key matching the JWT header (by kid when present,
+     else by alg). Boolean, or {:error ...} when no key matches."
+     [jwt-str {:keys [header] :as parsed} jwks allow-malleable?]
+     (let [{:keys [kid alg]} header
+           candidates (query-jwks jwks (if kid {:kid kid} {:alg alg}))]
+       (if (empty? candidates)
+         {:error "NoMatchingKey"
+          :message (str "No key in the keyset matches "
+                        (if kid (str "kid " (pr-str kid)) (str "alg " (pr-str alg))) ".")}
+         (reduce (fn [_ candidate]
+                   (let [res (check-signature jwt-str parsed {:jwk candidate} allow-malleable?)]
+                     (if (true? res)
+                       (reduced true)
+                       res)))
+                 false
+                 candidates)))))
+
+#?(:clj
    (defn- check-signature
      "Boolean, or {:error ...} for problems distinct from an invalid signature."
      [jwt-str {:keys [header] :as parsed} key allow-malleable?]
@@ -223,9 +245,12 @@
               :message "JWK is not a well-formed P-256/secp256k1 EC key."})
            (nimbus-verify jwt-str (:jwk key)))
 
+         (:jwks key)
+         (check-keyset-signature jwt-str parsed (:jwks key) allow-malleable?)
+
          :else
          {:error "UnsupportedKeyType"
-          :message "key must be a did:key string, {:pubkey ...}, or {:jwk ...}."}))))
+          :message "key must be a did:key string, {:pubkey ...}, {:jwk ...}, or {:jwks ...}."}))))
 
 #?(:clj
    (defn- verify-sync
@@ -268,6 +293,11 @@
     - a did:key string                       (ES256/ES256K via atproto.crypto)
     - {:pubkey {:alg .. :bytes ..}}          (ES256/ES256K raw key)
     - {:jwk {...}}                           (delegates to Nimbus for other algs)
+    - {:jwks {:keys [...]}}                  (keyset: candidates selected by the
+                                              JWT header kid, else alg; any
+                                              matching key may verify;
+                                              {:error \"NoMatchingKey\"} when
+                                              none matches)
 
   opts:
     :now              epoch seconds (default (runtime.crypto/now)) — for tests

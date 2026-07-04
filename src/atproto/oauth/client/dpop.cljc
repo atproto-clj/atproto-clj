@@ -48,9 +48,11 @@
 (defn- use-dpop-nonce-error?
   [{:keys [status headers body]}]
   (case status
-    ;; resource server returns a 401 w/ WWW-Authenticate header
+    ;; resource server returns a 401 w/ WWW-Authenticate header (which
+    ;; is absent on other 401s, e.g. a failed client authentication)
     401 (let [{:keys [www-authenticate]} headers]
-          (and (str/starts-with? www-authenticate "DPoP")
+          (and (string? www-authenticate)
+               (str/starts-with? www-authenticate "DPoP")
                (str/includes? www-authenticate "error=\"use_dpop_nonce\"")))
     ;; authorization server returns a 400 w/ code in body
     400 (= "use_dpop_nonce" (:error body))

@@ -141,3 +141,30 @@
          (testing "high-S signature is rejected with :allow-malleable? false"
            (is (= "BadJwtSignature"
                   (:error (result-of (jwt/verify bad-token did :allow-malleable? false))))))))))
+
+#?(:clj
+   (deftest verify-keyset-test
+     ;; {:jwks ...} keyset mode (WS-11A): candidates picked by kid, else alg
+     (let [jwk-a (jwt/generate-jwk {:alg "ES256" :kid "key-a"})
+           jwk-b (jwt/generate-jwk {:alg "ES256" :kid "key-b"})
+           jwks {:keys [(jwt/public-jwk jwk-a) (jwt/public-jwk jwk-b)]}
+           token-b (jwt/generate jwk-b {:alg "ES256" :kid "key-b"} claims)]
+       (testing "verifies with the matching kid"
+         (let [res (result-of (jwt/verify token-b {:jwks jwks}))]
+           (is (nil? (:error res)))
+           (is (= claims (:claims res)))))
+       (testing "verifies without a kid by trying alg-compatible keys"
+         (let [token (jwt/generate jwk-a {:alg "ES256"} claims)]
+           (is (nil? (:error (result-of (jwt/verify token {:jwks jwks})))))))
+       (testing "an unknown kid yields NoMatchingKey"
+         (let [token (jwt/generate jwk-a {:alg "ES256" :kid "key-z"} claims)]
+           (is (= "NoMatchingKey"
+                  (:error (result-of (jwt/verify token {:jwks jwks})))))))
+       (testing "a signature by a key outside the set fails"
+         (let [outsider (jwt/generate-jwk {:alg "ES256" :kid "key-b"})
+               token (jwt/generate outsider {:alg "ES256" :kid "key-b"} claims)]
+           (is (= "BadJwtSignature"
+                  (:error (result-of (jwt/verify token {:jwks jwks})))))))
+       (testing "an empty keyset yields NoMatchingKey"
+         (is (= "NoMatchingKey"
+                (:error (result-of (jwt/verify token-b {:jwks {:keys []}})))))))))
