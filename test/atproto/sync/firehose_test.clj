@@ -8,13 +8,16 @@
   http-kit WebSocket server. No live network."
   (:require [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as httpkit]
+            [atproto.crypto :as crypto]
             [atproto.data :as data]
             [atproto.data.cbor :as cbor]
             [atproto.identity :as identity]
             [atproto.lexicon :as lexicon]
+            [atproto.repo :as repo]
+            [atproto.repo.blockstore :as blockstore]
             [atproto.repo.car :as car]
             [atproto.repo.sync :as repo-sync]
-            [atproto.runtime.cast :as cast]
+            [atproto.repo.test-support.util :as util]
             [atproto.sync.cursor :as cursor]
             [atproto.sync.firehose :as firehose]
             [atproto.sync.runner :as runner]
@@ -313,6 +316,65 @@
           (is (= "RepoVerification" (:error (deref result 5000 {})))))))))
 
 ;; -----------------------------------------------------------------------------
+;; Verified mode, end to end: a real signed commit through verify-proofs
+;; -----------------------------------------------------------------------------
+
+(def ^:private keypair
+  (delay (util/ok! (util/result-of (crypto/generate "ES256K")))))
+
+(defn- signed-commit-message
+  "A #commit wire message for a real commit: an actual repo, an actual
+  ES256K signature, and a CAR of the commit's relevant blocks."
+  [& {:keys [seq] :or {seq 1}}]
+  (let [storage (blockstore/memory-blockstore)
+        r (util/ok! (util/result-of (repo/create storage did @keypair)))
+        write {:action :create
+               :collection "app.bsky.feed.post"
+               :rkey "3kabc"
+               :value post-record}
+        commit-data (util/ok! (util/result-of
+                               (repo/format-commit r write @keypair)))]
+    {:$type "com.atproto.sync.subscribeRepos#commit"
+     :seq seq
+     :rebase false
+     :tooBig false
+     :repo did
+     :commit (:cid commit-data)
+     :rev (:rev commit-data)
+     :since (:since commit-data)
+     :blocks (car/write-car (:cid commit-data)
+                            (map (fn [[cid bytes]] {:cid cid :bytes bytes})
+                                 (:relevant-blocks commit-data)))
+     :ops [{:action "create"
+            :path "app.bsky.feed.post/3kabc"
+            :cid (data/cid-for post-record)
+            :prev nil}]
+     :blobs []
+     :time "2026-07-04T12:00:00.000Z"}))
+
+(deftest parse-commit-verified-real-signature-test
+  (let [message (signed-commit-message)
+        match-all (firehose/match-collection-fn nil)]
+    (testing "a genuinely signed commit verifies"
+      (let [result (promise)]
+        (firehose/parse-commit-verified
+         (fn [_did _force? cb] (cb (crypto/did @keypair)))
+         message match-all #(deliver result %))
+        (let [{:keys [events error]} (deref result 10000 {:error "Timeout"})]
+          (is (nil? error))
+          (is (= [:create] (map :kind events)))
+          (is (data/eq? post-record (:record (first events)))))))
+    (testing "the wrong signing key is rejected (after one refresh retry)"
+      (let [other (util/ok! (util/result-of (crypto/generate "ES256K")))
+            calls (atom 0)
+            result (promise)]
+        (firehose/parse-commit-verified
+         (fn [_did _force? cb] (swap! calls inc) (cb (crypto/did other)))
+         message match-all #(deliver result %))
+        (is (= "RepoVerification" (:error (deref result 10000 {:error "Timeout"}))))
+        (is (= 2 @calls))))))
+
+;; -----------------------------------------------------------------------------
 ;; Socket layer
 ;; -----------------------------------------------------------------------------
 
@@ -341,6 +403,27 @@
     (let [evs (swap! events conj event)]
       (when (pred evs)
         (deliver done true)))))
+
+(deftest consume-verify-mode-test
+  (let [message (signed-commit-message :seq 7)
+        server (replay-server (fn [n] (when (= 1 n) [(message->frame-bytes message)])))
+        done (promise)
+        errors (atom [])
+        handle (firehose/consume
+                {:service (str "ws://127.0.0.1:" (:port server))
+                 :handler (fn [event] (deliver done event))
+                 :verify? true
+                 :resolve-key-fn (fn [_did _force? cb] (cb (crypto/did @keypair)))
+                 :on-error (fn [err] (swap! errors conj err))})]
+    (try
+      (let [event (deref done 10000 ::timeout)]
+        (is (= :create (:kind event)))
+        (is (= 7 (:seq event)))
+        (is (data/eq? post-record (:record event)))
+        (is (empty? @errors)))
+      (finally
+        (firehose/stop! handle)
+        (ws-server/stop! server)))))
 
 (deftest consume-delivers-typed-events-test
   (let [messages [(commit-message

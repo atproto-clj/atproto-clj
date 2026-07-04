@@ -571,6 +571,10 @@
                        WS-04 contract, with one forced key-refresh retry;
                        failing commits are dropped through on-error.
                        Default false.
+    :resolve-key-fn    (fn [did force-refresh? cb]) yielding the repo's
+                       signing key as a did:key string (or an error map);
+                       defaults to resolution via atproto.identity. Only
+                       used with :verify?.
     :reconnect-delay-ms delay before re-subscribing after a server close or
                        fatal websocket error (default 3000, reference
                        firehose/index.ts:139).
@@ -656,9 +660,31 @@
   afterwards. Idempotent."
   [handle]
   #?(:clj
-     (let [{:keys [state]} handle
-           [{:keys [ws stopped?]} _] (swap-vals! (:state handle) assoc :stopped? true)]
+     (let [[{:keys [ws stopped?]} _]
+           (swap-vals! (:state handle) assoc :stopped? true)]
        (when (and ws (not stopped?))
          (ws/close! ws))
        nil)
      :cljs nil))
+
+(comment
+  ;; Live verification against the public relay (manual; not run in CI).
+
+  (def store (cursor/memory-store))
+
+  (def handle
+    (consume {:service "wss://bsky.network"
+              :handler (fn [event]
+                         (when (= :create (:kind event))
+                           (prn (:collection event) (:uri event))))
+              :cursor-store store
+              :filter-collections ["app.bsky.feed.post"]
+              :on-error prn}))
+
+  ;; Verified mode (signature + proof checks; noticeably slower):
+  ;; (consume {:service "wss://bsky.network" :handler prn :verify? true
+  ;;           :on-error prn})
+
+  (cursor/get-cursor store prn)
+  (stop! handle)
+  )
