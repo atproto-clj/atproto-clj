@@ -21,7 +21,7 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | Data model          | 🔵 | 🟡 | ❓ |
 | Lex Validation      | 🔵 | 🔵 | ❓ |
 | Identity Resolution | 🔵 | 🔵 | ❓ |
-| Stream client       | 🟢 (Jetstream only) | ⭕ | ⭕ |
+| Stream client       | 🔵 (firehose, Jetstream, Tap) | ⭕ | ⭕ |
 | Service Auth        | 🔵 | 🟡 | ❓ |
 | Lex Codegen         | N/A | N/A | N/A |
 | PLC Operations      | 🔵 | ⭕ | ⭕ |

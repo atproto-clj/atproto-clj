@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented (PR-1–PR-6 merged to `redesign`: resolver rewrite, eval-free registration, strict/lenient modes, record-key enforcement, bundled lexicons, install!/embed-resources!; plus verified resolution via WS-04 commit proofs) |
 | **Priority** | P1 |
 | **Estimated size** | M |
 | **Branch** | ws/09-lexicon-completion |

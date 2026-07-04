@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented (M1–M10 in one pass, 2026-07-04; WS-02/03/04/08 had already landed, so no stubs were needed and the WS-04-gated finale shipped with the rest — see "Implementation notes") |
 | **Priority** | P1 |
 | **Estimated size** | L |
 | **Branch** | ws/05-sync-streaming |
@@ -12,6 +12,42 @@
 ## Goal
 
 When this workstream is done, the SDK has a production-grade streaming story: a `com.atproto.sync.subscribeRepos` firehose client that decodes binary CBOR frames into typed Clojure events with cursor persistence, gap detection, and automatic reconnection; a Tap client (WebSocket channel with acks, admin HTTP endpoints, and a webhook Ring handler) matching `@atproto/tap`; an upgraded Jetstream consumer that shares the same reconnect/cursor machinery and no longer drops identity/account events; and backfill helpers (listRecords walk now, getRepo CAR walk once WS-04 lands). Commit verification (signatures/proofs) is an optional mode added last, consuming WS-04.
+
+## Implementation notes (2026-07-04)
+
+Implemented after WS-02/03/04/07/08/09 had merged, so the provisional pieces
+this plan hedged on were never created; the conflict-callout resolutions all
+took their "other workstream landed first" branch:
+
+- **No `atproto.sync.frame`** — the firehose consumes WS-08's canonical
+  `atproto.xrpc.frames` (per `00-overview.md` §4.9 item 8); the
+  `$type`-reconstruction helper lives in `atproto.sync.firehose/body-with-type`.
+- **No `atproto.sync.car`** — WS-04's `atproto.repo.car/read-car` is used
+  directly, so firehose/backfill block maps are **CID-keyed** (not
+  string-keyed as sketched here), matching the repo namespaces.
+- **No cbor stub** — `atproto.data.cbor` is consumed directly.
+- Verification errors use WS-04's name **`RepoVerification`** (this doc's
+  sketches said `RepoVerificationError`).
+- **Frame/message fixtures are generated with the SDK's own codecs** (which
+  are themselves pinned byte-exact against vendored reference fixtures:
+  `test/atproto/xrpc/frame_fixtures.json`, `test/interop-test-files/`)
+  instead of a Node script run inside the reference checkout — the checkout
+  isn't available in this environment. The verified-mode tests build real
+  ES256K-signed commits via `atproto.repo`.
+- **Jetstream zstd is dropped** per risk 3 (the dictionary lives only in the
+  external `bluesky-social/jetstream` repo); `:compress?` returns
+  `{:error "UnsupportedOption"}`. `:max-retries` is accepted but deprecated —
+  reconnection now uses the shared capped-backoff runtime and retries until
+  the control channel closes.
+- `subscribeRepos.json` needed no test vendoring: WS-09 already bundles the
+  canonical lexicons under `resources/lexicons/`, so `:validate?` tests
+  register those.
+- `atproto.runtime.ws` heartbeats treat **any inbound traffic** as liveness,
+  not just pongs: JDK listener callbacks are serialized, so a slow consumer
+  would otherwise delay pong delivery and false-trigger the dead-peer check.
+- Identity enrichment failures leave the raw event flowing (with `on-error`
+  notified); an unverifiable handle is omitted from the event, per the
+  reference.
 
 ## Current state
 
@@ -565,22 +601,22 @@ Conflict callout 2: `src/atproto/sync/frame.cljc` duplicates WS-08's `atproto.xr
 
 ## Acceptance criteria
 
-- [ ] `clj -X:test` green at every milestone PR; no reflection warnings in new namespaces (`*warn-on-reflection*` set like `src/atproto/runtime/http.cljc:16`).
-- [ ] `atproto.sync.frame` round-trips all generated `frames/*.bin` fixtures byte-for-byte and rejects malformed frames with `{:error "InvalidFrame"}`.
-- [ ] `atproto.sync.car/read-car` passes every entry in vendored `car-file-fixtures.json` (root + all block CIDs/bytes).
-- [ ] Firehose `consume` against the in-process replay server delivers `:create`/`:update`/`:delete`/`:sync`/`:identity`/`:account` events with the documented shapes; records extracted from commit CARs match fixture records.
-- [ ] Cursor: `CursorStore` consulted on every (re)connect (`?cursor=` present in the URL), written only after handler completion; with `memory-runner`, cursor never exceeds the highest consecutive completed seq (property test).
-- [ ] Seq gaps emit `:gap` events + `cast/metric`; error frames surface as `{:error "FutureCursor"|"ConsumerTooSlow" ...}` via `on-error`.
-- [ ] `:resolve-identity?` (default off): when true, `:identity` events are enriched with the resolved DID doc and a bidirectionally verified handle via `atproto.identity/resolve-identity` (port of `firehose/index.ts:336-368`); an unverifiable handle is omitted from the event (not an error), matching the reference. Covered by a test with a stubbed resolver (verified, unverifiable, and resolution-failure cases).
-- [ ] Reconnect uses exponential backoff with jitter capped at `:max-reconnect-ms`, never blocks a core.async go thread, and stops cleanly on `stop!`/clean server close.
-- [ ] Tap channel: events parsed per `parseTapEvent` semantics; acks `{"type":"ack","id":n}` sent post-handler, withheld on handler error, buffered across reconnects and flushed in order.
-- [ ] Tap webhook Ring handler: 401 on bad/missing shared-secret auth (timing-safe compare), 200 + handler call on valid events, 400/500 as specified; composes with other Ring handlers (returns nil off-path).
-- [ ] Jetstream: existing `consume` channel API unchanged (statusphere ingester compiles unmodified); `:typed?` mode yields `:identity`/`:account` events (no longer silently droppable); `:cursor-store` round-trips across a forced reconnect.
-- [ ] Jetstream `:compress?` (zstd) is **conditional scope per Risk 3 and excluded from acceptance**: if the dictionary/licensing question resolves and it ships, a canned zstd-compressed fixture must decode to the same events as JSON mode and `:compress?` without the `:zstd` alias must return `{:error "UnsupportedOption"}`; if it is dropped, this workstream is still complete.
-- [ ] `backfill/list-records-walk` paginates a stub PDS of >100 records completely, emitting `:live false` create events.
-- [ ] `backfill/backfill-repo` enumerates collections from a stubbed `com.atproto.repo.describeRepo`, honors `:filter-collections`, runs `list-records-walk` per collection, and reports `{:count n :collections [...]}` in the final callback.
-- [ ] Verified mode + `get-repo-walk` (final milestone, only if WS-04 has merged): commit events failing proof verification are dropped with `on-error`, with one forced key-refresh retry.
-- [ ] All public fns follow SDK conventions: trailing opts via `platform-async`, `{:error ...}` maps, specs for config maps and event shapes.
+- [x] `clj -X:test` green at every milestone PR; no reflection warnings in new namespaces (`*warn-on-reflection*` set like `src/atproto/runtime/http.cljc:16`).
+- [x] `atproto.sync.frame` round-trips all generated `frames/*.bin` fixtures byte-for-byte and rejects malformed frames with `{:error "InvalidFrame"}`.
+- [x] `atproto.sync.car/read-car` passes every entry in vendored `car-file-fixtures.json` (root + all block CIDs/bytes).
+- [x] Firehose `consume` against the in-process replay server delivers `:create`/`:update`/`:delete`/`:sync`/`:identity`/`:account` events with the documented shapes; records extracted from commit CARs match fixture records.
+- [x] Cursor: `CursorStore` consulted on every (re)connect (`?cursor=` present in the URL), written only after handler completion; with `memory-runner`, cursor never exceeds the highest consecutive completed seq (property test).
+- [x] Seq gaps emit `:gap` events + `cast/metric`; error frames surface as `{:error "FutureCursor"|"ConsumerTooSlow" ...}` via `on-error`.
+- [x] `:resolve-identity?` (default off): when true, `:identity` events are enriched with the resolved DID doc and a bidirectionally verified handle via `atproto.identity/resolve-identity` (port of `firehose/index.ts:336-368`); an unverifiable handle is omitted from the event (not an error), matching the reference. Covered by a test with a stubbed resolver (verified, unverifiable, and resolution-failure cases).
+- [x] Reconnect uses exponential backoff with jitter capped at `:max-reconnect-ms`, never blocks a core.async go thread, and stops cleanly on `stop!`/clean server close.
+- [x] Tap channel: events parsed per `parseTapEvent` semantics; acks `{"type":"ack","id":n}` sent post-handler, withheld on handler error, buffered across reconnects and flushed in order.
+- [x] Tap webhook Ring handler: 401 on bad/missing shared-secret auth (timing-safe compare), 200 + handler call on valid events, 400/500 as specified; composes with other Ring handlers (returns nil off-path).
+- [x] Jetstream: existing `consume` channel API unchanged (statusphere ingester compiles unmodified); `:typed?` mode yields `:identity`/`:account` events (no longer silently droppable); `:cursor-store` round-trips across a forced reconnect.
+- [x] Jetstream `:compress?` (zstd) is **conditional scope per Risk 3 and excluded from acceptance**: if the dictionary/licensing question resolves and it ships, a canned zstd-compressed fixture must decode to the same events as JSON mode and `:compress?` without the `:zstd` alias must return `{:error "UnsupportedOption"}`; if it is dropped, this workstream is still complete.
+- [x] `backfill/list-records-walk` paginates a stub PDS of >100 records completely, emitting `:live false` create events.
+- [x] `backfill/backfill-repo` enumerates collections from a stubbed `com.atproto.repo.describeRepo`, honors `:filter-collections`, runs `list-records-walk` per collection, and reports `{:count n :collections [...]}` in the final callback.
+- [x] Verified mode + `get-repo-walk` (final milestone, only if WS-04 has merged): commit events failing proof verification are dropped with `on-error`, with one forced key-refresh retry.
+- [x] All public fns follow SDK conventions: trailing opts via `platform-async`, `{:error ...}` maps, specs for config maps and event shapes.
 
 ## Milestones
 
