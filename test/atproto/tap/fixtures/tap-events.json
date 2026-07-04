@@ -1,0 +1,168 @@
+{
+  "_meta": {
+    "note": "Tap wire-shape events for atproto.tap.events tests. Shapes mirror the @atproto/tap tests (channel.test.ts wire shape; _util.ts has the parsed flat shape) at commit b9ef557 of bluesky-social/atproto.",
+    "cid": "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454"
+  },
+  "valid": {
+    "record-create": {
+      "id": 1,
+      "type": "record",
+      "record": {
+        "live": true,
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "rev": "3kao2c5nmvz2c",
+        "collection": "app.bsky.feed.post",
+        "rkey": "3kao2c5nmvv2c",
+        "action": "create",
+        "cid": "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454",
+        "record": {
+          "$type": "app.bsky.feed.post",
+          "text": "hello world",
+          "createdAt": "2026-06-10T00:00:00.000Z"
+        }
+      }
+    },
+    "record-update": {
+      "id": 2,
+      "type": "record",
+      "record": {
+        "live": false,
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "rev": "3kao2c5nmvz2d",
+        "collection": "app.bsky.actor.profile",
+        "rkey": "self",
+        "action": "update",
+        "cid": "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454",
+        "record": {
+          "$type": "app.bsky.actor.profile",
+          "displayName": "Alice"
+        }
+      }
+    },
+    "record-delete": {
+      "id": 3,
+      "type": "record",
+      "record": {
+        "live": true,
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "rev": "3kao2c5nmvz2e",
+        "collection": "app.bsky.feed.post",
+        "rkey": "3kao2c5nmvv2c",
+        "action": "delete"
+      }
+    },
+    "record-with-links": {
+      "id": 4,
+      "type": "record",
+      "record": {
+        "live": true,
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "rev": "3kao2c5nmvz2f",
+        "collection": "app.bsky.feed.like",
+        "rkey": "3kao2c5nmvv2d",
+        "action": "create",
+        "cid": "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454",
+        "record": {
+          "$type": "app.bsky.feed.like",
+          "subject": {
+            "uri": "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/app.bsky.feed.post/3kao2c5nmvv2c",
+            "cid": {
+              "$link": "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454"
+            }
+          },
+          "payload": {
+            "$bytes": "aGVsbG8"
+          },
+          "createdAt": "2026-06-10T00:00:00.000Z"
+        }
+      }
+    },
+    "identity": {
+      "id": 5,
+      "type": "identity",
+      "identity": {
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "handle": "alice.test",
+        "is_active": true,
+        "status": "active"
+      }
+    },
+    "identity-minimal": {
+      "id": 6,
+      "type": "identity",
+      "identity": {
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "is_active": false
+      }
+    },
+    "record-extra-fields": {
+      "id": 7,
+      "type": "record",
+      "future_envelope_field": "ignored",
+      "record": {
+        "live": true,
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "rev": "3kao2c5nmvz2g",
+        "collection": "app.bsky.feed.post",
+        "rkey": "3kao2c5nmvv2e",
+        "action": "delete",
+        "future_field": 42
+      }
+    }
+  },
+  "invalid": {
+    "missing-did": {
+      "id": 8,
+      "type": "record",
+      "record": {
+        "live": true,
+        "rev": "3kao2c5nmvz2h",
+        "collection": "app.bsky.feed.post",
+        "rkey": "3kao2c5nmvv2f",
+        "action": "create",
+        "cid": "bafyreie5cvv4h45feadgeuwhbcutmh6t2ceseocckahdoe6uat64zmz454",
+        "record": {
+          "text": "hi"
+        }
+      }
+    },
+    "bad-type": {
+      "id": 9,
+      "type": "bogus",
+      "record": {}
+    },
+    "wrong-action": {
+      "id": 10,
+      "type": "record",
+      "record": {
+        "live": true,
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "rev": "3kao2c5nmvz2i",
+        "collection": "app.bsky.feed.post",
+        "rkey": "3kao2c5nmvv2g",
+        "action": "destroy"
+      }
+    },
+    "create-without-cid": {
+      "id": 11,
+      "type": "record",
+      "record": {
+        "live": true,
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "rev": "3kao2c5nmvz2j",
+        "collection": "app.bsky.feed.post",
+        "rkey": "3kao2c5nmvv2h",
+        "action": "create"
+      }
+    },
+    "wrong-field-type": {
+      "id": 12,
+      "type": "identity",
+      "identity": {
+        "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+        "is_active": "yes"
+      }
+    },
+    "not-a-map": 42
+  }
+}
