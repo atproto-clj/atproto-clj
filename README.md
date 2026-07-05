@@ -12,19 +12,19 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | Component           | Clojure | ClojureScript | ClojureDart |
 | ------------------- | ------- | ------------- | ----------- |
 | **Basic**           | | | |
-| API Client          | 🟢 | 🟢 | 🟡 |
-| Lexicon Types       | 🟢 | 🟢 | 🟢 |
-| Identifier Syntax   | 🟢 | 🟢 | 🟢 |
+| API Client          | 🔵 | 🔵 | 🟡 |
+| Lexicon Types       | 🔵 | 🔵 | 🔵 |
+| Identifier Syntax   | 🔵 | 🔵 | 🔵 |
 | **Protocol + Data** | | | |
-| Keys and Crypto     | 🟢 | ⭕ | ⭕ |
-| MST and Repo        | 🟢 | ⭕ | ⭕ |
-| Data model          | 🟡 (no CBOR) | 🟡 (no CBOR) | ❓ |
-| Lex Validation      | 🟢 | 🟢 | ❓ |
-| Identity Resolution | 🟢 | 🟢 | ❓ |
+| Keys and Crypto     | 🔵 | ⭕ | ⭕ |
+| MST and Repo        | 🔵 | ⭕ | ⭕ |
+| Data model          | 🔵 | 🟡 | ❓ |
+| Lex Validation      | 🔵 | 🔵 | ❓ |
+| Identity Resolution | 🔵 | 🔵 | ❓ |
 | Stream client       | 🟢 (Jetstream only) | ⭕ | ⭕ |
-| Service Auth        | 🟡 | 🟡 | ❓ |
+| Service Auth        | 🔵 | 🟡 | ❓ |
 | Lex Codegen         | N/A | N/A | N/A |
-| PLC Operations      | 🟢 | ⭕ | ⭕ |
+| PLC Operations      | 🔵 | ⭕ | ⭕ |
 | OAuth Backend       | 🔵 | ⭕ | ⭕ |
 | **Service Pieces**  | | | |
 | HTTP Server         | 🟡 | 🟡 | ⭕ |
