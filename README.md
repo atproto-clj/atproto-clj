@@ -25,15 +25,16 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | Service Auth        | 🟡 | 🟡 | ❓ |
 | Lex Codegen         | N/A | N/A | N/A |
 | PLC Operations      | 🟢 | ⭕ | ⭕ |
-| OAuth Backend       | 🟢 | ⭕ | ⭕ |
+| OAuth Backend       | 🔵 | ⭕ | ⭕ |
 | **Service Pieces**  | | | |
 | HTTP Server         | 🟡 | 🟡 | ⭕ |
 | Identity Directory  | ⭕ | ⭕ | ⭕ |
-| Repo Storage        | 🟢 | ⭕ | ⭕ |
-| Stream Server       | 🟢 | ⭕ | ⭕ |
+| Repo Storage        | 🔵 | ⭕ | ⭕ |
+| Stream Server       | 🔵 | ⭕ | ⭕ |
 
 - ✅ great! complete, documented, examples, accessible to new devs with no atproto experience
 - 🟢 decent. mostly implemented, could point experienced devs at it
+- 🔵 complete with automated tests, but AI-generated and not yet fully validated by a human
 - 🟡 partial progress: incomplete, undocumented, not ergonomic
 - 🚧 early work in progress, but not usable yet
 - ⭕ nothing started
