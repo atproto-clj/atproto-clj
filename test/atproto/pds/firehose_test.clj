@@ -1,7 +1,9 @@
 (ns atproto.pds.firehose-test
-  "Outbox algorithm tests (pure core.async) plus a websocket integration
-  test serving com.atproto.sync.subscribeRepos through WS-08's transport
-  and consuming raw frames with a vanilla java.net.http.WebSocket client."
+  "Outbox algorithm tests (pure core.async) plus websocket integration
+  tests serving com.atproto.sync.subscribeRepos through WS-08's transport:
+  raw frames are asserted with a vanilla java.net.http.WebSocket client,
+  and the stream is consumed end-to-end by the WS-05 firehose client
+  (atproto.sync.firehose)."
   (:require [clojure.test :refer :all]
             [clojure.java.io :as io]
             [clojure.core.async :as async]
@@ -10,6 +12,8 @@
             [atproto.data.cbor :as cbor]
             [atproto.lexicon :as lexicon]
             [atproto.repo.car :as car]
+            [atproto.sync.cursor :as cursor]
+            [atproto.sync.firehose :as sync-firehose]
             [atproto.xrpc.frames :as frames]
             [atproto.xrpc.server :as xrpc-server]
             [atproto.xrpc.server.ring :as ring]
@@ -294,5 +298,74 @@
             (is (nil? error))
             (is (= "#identity" (:t (first frames))))
             (is (= "fresh.test" (get-in (first frames) [:body :handle]))))))
+      (finally
+        (httpkit/server-stop! http-server)))))
+
+(deftest ws05-firehose-client-consumes-stream-test
+  ;; 11-service-pieces.md acceptance: frames emitted by this stream server
+  ;; are consumed and decoded by the WS-05 firehose client — backfill from
+  ;; cursor 0, typed events (the commit CAR resolved into a :create event
+  ;; with its record), and cursor-store advancement.
+  (let [seqr *seqr*
+        did "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa"
+        post-record {:$type "app.bsky.feed.post" :text "hello from the stream server"}
+        record-bytes (cbor/encode post-record)
+        record-cid (data/cid-for post-record)
+        commit-bytes (cbor/encode {:fake "commit"})
+        commit-cid (data/cid-link commit-bytes)
+        server (xrpc-server/init {:lexicon @firehose-lexicon})
+        http-server (httpkit/run-server
+                     (fn [req]
+                       ((ring/handler server) (assoc req :app-ctx {:sequencer seqr})))
+                     {:port 0 :legacy-return-value? false})
+        port (httpkit/server-port http-server)]
+    (try
+      (seed-identity! seqr 1)
+      @(sequencer/sequence-commit!
+        seqr did
+        {:cid commit-cid
+         :rev "3aaaaaaaaaaa2a"
+         :since nil
+         :new-blocks {commit-cid commit-bytes record-cid record-bytes}
+         :relevant-blocks {commit-cid commit-bytes record-cid record-bytes}
+         :removed-cids #{}
+         :ops [{:action "create" :path "app.bsky.feed.post/3aaaaaaaaaaa2a" :cid record-cid}]})
+      @(sequencer/sequence-account! seqr did {:active false :status "takendown"})
+      (let [events (atom [])
+            errors (atom [])
+            done (promise)
+            store (cursor/memory-store)
+            handle (sync-firehose/consume
+                    {:service (str "ws://127.0.0.1:" port)
+                     :cursor 0
+                     :cursor-store store
+                     :handler (fn [event]
+                                (when (= 3 (count (swap! events conj event)))
+                                  (deliver done true)))
+                     :on-error (fn [err] (swap! errors conj err))})]
+        (try
+          (is (true? (deref done 5000 ::timeout)))
+          (is (empty? @errors))
+          (let [[ident create account] @events]
+            (is (= :identity (:kind ident)))
+            (is (= "user0.test" (:handle ident)))
+            (is (= :create (:kind create)))
+            (is (= did (:did create)))
+            (is (= (str "at://" did "/app.bsky.feed.post/3aaaaaaaaaaa2a")
+                   (:uri create)))
+            (is (= record-cid (:cid create)))
+            (is (data/eq? post-record (:record create))
+                "the record decoded from the served commit CAR matches")
+            (is (= commit-cid (:commit create)))
+            (is (= "3aaaaaaaaaaa2a" (:rev create)))
+            (is (= :account (:kind account)))
+            (is (false? (:active account)))
+            (is (= "takendown" (:status account))))
+          ;; the client's cursor store advanced to the last handled seq
+          (let [c (promise)]
+            (cursor/get-cursor store #(deliver c %))
+            (is (= {:cursor 3} (deref c 1000 ::timeout))))
+          (finally
+            (sync-firehose/stop! handle))))
       (finally
         (httpkit/server-stop! http-server)))))

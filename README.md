@@ -27,7 +27,7 @@ From [What goes in to a Bluesky or atproto SDK?](https://github.com/bluesky-soci
 | PLC Operations      | 🔵 | ⭕ | ⭕ |
 | OAuth Backend       | 🔵 | ⭕ | ⭕ |
 | **Service Pieces**  | | | |
-| HTTP Server         | 🟡 | 🟡 | ⭕ |
+| HTTP Server         | 🔵 | 🟡 | ⭕ |
 | Identity Directory  | ⭕ | ⭕ | ⭕ |
 | Repo Storage        | 🔵 | ⭕ | ⭕ |
 | Stream Server       | 🔵 | ⭕ | ⭕ |

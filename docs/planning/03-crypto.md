@@ -430,16 +430,16 @@ CI: `clojure -X:test` must stay green at every milestone.
 
 ## Acceptance criteria
 
-- [ ] `atproto.crypto/generate`, `import-private-key`, `export`, `keypair->jwk`/`jwk->keypair` work for both `"ES256"` and `"ES256K"` on the JVM.
-- [ ] `sign` produces 64-byte compact, low-S, RFC 6979-deterministic signatures for both curves; own sigs verify strictly.
-- [ ] All 6 vectors of `test/interop-test-files/crypto/signature-fixtures.json` pass: strict `verify` matches `validSignature` exactly, and `high-s`/`der-encoded` vectors verify `true` with `:allow-malleable? true`.
-- [ ] All 5 `w3c_didkey_K256.json` and 1 `w3c_didkey_P256.json` vectors derive the expected `did:key` from the private key.
-- [ ] `did-key->pubkey` returns uncompressed 65-byte keys with the correct `:alg`; unsupported prefixes (e.g. ed25519) yield `{:error "UnsupportedKeyType"}`.
-- [ ] `atproto.runtime.crypto/sha256` accepts byte arrays and strings; `base64-encode` is correctly hinted and emits **unpadded** output (`base64-decode` accepts padded and unpadded — 00-overview §4.9 item 4); OAuth/DPoP and `atproto.data.json` test suites still pass.
-- [ ] `atproto.runtime.jwt/parse`/`verify`/`sign` round-trip ES256 and ES256K compact JWTs, including a Nimbus-`generate`d ES256 token verified by the new `verify`; temporal claim failures produce the documented error maps.
-- [ ] No reflection warnings in the touched namespaces (`*warn-on-reflection*` is set).
-- [ ] Frozen contract functions exist with the exact signatures in "Interface contract".
-- [ ] `clojure -X:test` green; no files outside the "File ownership" table changed.
+- [x] `atproto.crypto/generate`, `import-private-key`, `export`, `keypair->jwk`/`jwk->keypair` work for both `"ES256"` and `"ES256K"` on the JVM.
+- [x] `sign` produces 64-byte compact, low-S, RFC 6979-deterministic signatures for both curves; own sigs verify strictly.
+- [x] All 6 vectors of `test/interop-test-files/crypto/signature-fixtures.json` pass: strict `verify` matches `validSignature` exactly, and `high-s`/`der-encoded` vectors verify `true` with `:allow-malleable? true`.
+- [x] All 5 `w3c_didkey_K256.json` and 1 `w3c_didkey_P256.json` vectors derive the expected `did:key` from the private key.
+- [x] `did-key->pubkey` returns uncompressed 65-byte keys with the correct `:alg`; unsupported prefixes (e.g. ed25519) yield `{:error "UnsupportedKeyType"}`.
+- [x] `atproto.runtime.crypto/sha256` accepts byte arrays and strings; `base64-encode` is correctly hinted and emits **unpadded** output (`base64-decode` accepts padded and unpadded — 00-overview §4.9 item 4); OAuth/DPoP and `atproto.data.json` test suites still pass.
+- [x] `atproto.runtime.jwt/parse`/`verify`/`sign` round-trip ES256 and ES256K compact JWTs, including a Nimbus-`generate`d ES256 token verified by the new `verify`; temporal claim failures produce the documented error maps.
+- [x] No reflection warnings in the touched namespaces (`*warn-on-reflection*` is set).
+- [x] Frozen contract functions exist with the exact signatures in "Interface contract".
+- [x] `clojure -X:test` green; no files outside the "File ownership" table changed.
 
 ## Milestones
 
