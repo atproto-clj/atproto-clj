@@ -635,33 +635,33 @@ same commit, so the copies must not diverge (see File ownership).
 
 ## Acceptance criteria
 
-- [ ] `credentials.cljc` refresh: an XRPC call returning 400/`ExpiredToken` on a credentials session
+- [x] `credentials.cljc` refresh: an XRPC call returning 400/`ExpiredToken` on a credentials session
       transparently refreshes via `com.atproto.server.refreshSession` and the retried call succeeds
       (stubbed-HTTP test green); no `ex-info "A service or a session is required."` is reachable
       from the refresh path.
-- [ ] OAuth refresh: `refresh-session` performs a DPoP-bound `refresh_token` grant, re-verifies the
+- [x] OAuth refresh: `refresh-session` performs a DPoP-bound `refresh_token` grant, re-verifies the
       issuer, persists `{:iss ... :tokens {... :expires-at ...}}` via `store/set`, and delivers a
       session satisfying `xrpc.client/Session`.
-- [ ] No auth path can hang: every refresh/restore failure mode delivers an `{:error ...}` map to
+- [x] No auth path can hang: every refresh/restore failure mode delivers an `{:error ...}` map to
       the caller's promise/callback/channel (verified by tests that `deref` with timeouts).
-- [ ] Refresh failure propagates the full error map (not a bare string) through
+- [x] Refresh failure propagates the full error map (not a bare string) through
       `delegate-auth-interceptor`.
-- [ ] Exactly one refresh occurs for N concurrent expired requests on one client (test with N≥32),
+- [x] Exactly one refresh occurs for N concurrent expired requests on one client (test with N≥32),
       and exactly one token-endpoint call for concurrent `oauth/refresh` calls on one DID.
-- [ ] `invalid_grant` concurrency recovery: adopts a foreign refresh when store tokens changed;
+- [x] `invalid_grant` concurrency recovery: adopts a foreign refresh when store tokens changed;
       deletes the session and returns `TokenRefreshError` otherwise.
-- [ ] Retried requests are byte-identical to the originals apart from auth/DPoP headers (no JSON
+- [x] Retried requests are byte-identical to the originals apart from auth/DPoP headers (no JSON
       double-encoding), and at most one retry happens per logical request.
-- [ ] `invalid-token-response?` passes the detection table (charset suffix, 400+ExpiredToken,
+- [x] `invalid-token-response?` passes the detection table (charset suffix, 400+ExpiredToken,
       401 bare, 401+`invalid_token` WWW-Authenticate; `use_dpop_nonce` excluded).
-- [ ] `oauth-client/revoke` calls the AS `revocation_endpoint` when present (best-effort) and always
+- [x] `oauth-client/revoke` calls the AS `revocation_endpoint` when present (best-effort) and always
       deletes the stored session; `restore` of the revoked DID then yields `SessionNotFound`.
-- [ ] `credentials/logout` calls `deleteSession` with the refresh JWT.
-- [ ] OAuth `callback` rejects state entries older than 1h and deletes them; `memory-store` does not
+- [x] `credentials/logout` calls `deleteSession` with the refresh JWT.
+- [x] OAuth `callback` rejects state entries older than 1h and deletes them; `memory-store` does not
       grow unboundedly from abandoned `authorize` flows.
-- [ ] Statusphere logout destroys the OAuth session (store row deleted; `;; todo: destroy oauth
+- [x] Statusphere logout destroys the OAuth session (store row deleted; `;; todo: destroy oauth
       session` comment gone).
-- [ ] `clojure -X:test` green on every milestone PR; existing tests unmodified except where behavior
+- [x] `clojure -X:test` green on every milestone PR; existing tests unmodified except where behavior
       intentionally changed.
 
 ## Milestones

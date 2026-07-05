@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented (11A M1–M6, 11B M1–M3, 11C M1–M3 merged to `redesign` — PRs #22–#25; 11B M4 optional S3 blobstore not built; 11D memo written then dropped by decision, commit `41f23bf`) |
 | **Priority** | P2 |
 | **Estimated size** | XL |
 | **Branch** | ws/11-service-pieces |
@@ -872,31 +872,47 @@ Shared-file conflicts and resolutions:
 
 ## Acceptance criteria
 
-- [ ] Sub-stream charters (this doc) reviewed; protocol sketches in
+- [x] Sub-stream charters (this doc) reviewed; protocol sketches in
       Deliverables accepted by the owners of WS-03, WS-04, WS-08 (names
-      reconciled with their published contracts).
-- [ ] 11A: `atproto.oauth.client` completes authorize→token→refresh→revoke
+      reconciled with their published contracts — the code consumes
+      `atproto.repo.blockstore`, `atproto.xrpc.frames`,
+      `xrpc.server/handle-subscription`, and `runtime.jwt/verify` as merged).
+- [x] 11A: `atproto.oauth.client` completes authorize→token→refresh→revoke
       against `atproto.oauth.provider` over real HTTP with DPoP nonces
       enforced, using both memory and SQLite stores; `verify-access-token`
       rejects tokens with mismatched DPoP keys.
-- [ ] 11A: provider metadata + JWKS endpoints validate against
+      (`test/atproto/oauth/provider/conformance_test.clj`;
+      `provider_test.clj` `verify-access-token-test`.)
+- [x] 11A: provider metadata + JWKS endpoints validate against
       `oauth-types` schema requirements (required fields, PAR advertised and
-      required).
-- [ ] 11B: SQLite blockstore passes the same conformance suite as the memory
+      required). (Required fields asserted directly in `metadata-test`/
+      `jwks-test`; no formal `oauth-types` schema document is applied.)
+- [x] 11B: SQLite blockstore passes the same conformance suite as the memory
       blockstore; vendored CAR fixtures load and round-trip
-      block-for-block.
-- [ ] 11B: disk blobstore lifecycle (temp→permanent→quarantine→delete) green
+      block-for-block. (`actor_store_test.clj` runs one
+      `blockstore-conformance-suite` against both, plus
+      `car-fixtures-round-trip-test`.)
+- [x] 11B: disk blobstore lifecycle (temp→permanent→quarantine→delete) green
       on CI temp dirs; actor-store create/read/transact/destroy green.
-- [ ] 11C: a consumer connecting with an old in-window cursor receives every
+- [x] 11C: a consumer connecting with an old in-window cursor receives every
       event exactly once across backfill/cutover/live under concurrent writes;
       `FutureCursor`/`OutdatedCursor`/`ConsumerTooSlow` behaviors match the
-      reference handler.
-- [ ] 11C: frames consumed and decoded by the WS-05 firehose client; structure
+      reference handler. (`firehose_test.clj`
+      `backfill-cutover-live-exactly-once-test` et al.)
+- [x] 11C: frames consumed and decoded by the WS-05 firehose client; structure
       matches reference-PDS frames for equivalent events.
-- [ ] 11D: decision memo merged with an explicit recommendation.
-- [ ] README progress matrix rows for OAuth Backend / Repo Storage / Stream
+      (`firehose_test.clj` connects `atproto.sync.firehose` to the served
+      `subscribeRepos` endpoint; the byte-level comparison against a live
+      reference PDS remains a manual check — see "Against a live/reference
+      service" above.)
+- [ ] 11D: decision memo merged with an explicit recommendation. *(Dropped by
+      decision: the memo was written and then removed in commit `41f23bf` —
+      deferring the PLC directory is a scope call, not a standing document.
+      The README "Identity Directory" row stays ⭕.)*
+- [x] README progress matrix rows for OAuth Backend / Repo Storage / Stream
       Server updated in each sub-stream's final PR.
-- [ ] All milestones below merged with green `clj -X:test` builds.
+- [x] All milestones below merged with green `clj -X:test` builds (except
+      11B M4, which was optional and not built, and 11D M1, dropped as above).
 
 ## Milestones
 

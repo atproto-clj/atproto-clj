@@ -535,6 +535,8 @@ in each doc's Risks section):
    §4.9 items 7–8 with the three owners.
 3. `multibase->did-key` convenience: add to WS-03's surface, or have 06/08 compose (§4.2)?
 4. Remove the unused Tink dependency in WS-03's deps.edn PR? (No planned workstream uses it.)
+   **Resolved 2026-07-05: removed** — nothing under `src/`, `test/`, `examples/`, or `dev/`
+   references Tink.
 5. Async `Store`/cache protocols: stay synchronous everywhere for now (01/06/11 all assume so);
    who owns a future async-ification if needed?
 6. cljs DoH default endpoint: default-on (Cloudflare, leaks handle lookups) vs opt-in (TS parity)
@@ -557,9 +559,9 @@ each doc's Milestones section):
 - [x] WS-07 XRPC Client Ergonomics & API Conveniences (`ws/07-xrpc-client-ergonomics`)
 - [x] WS-08 Service Auth & XRPC Server Completion (`ws/08-service-auth-xrpc-server`)
 - [x] WS-09 Lexicon Resolution & Validation Modes (`ws/09-lexicon-completion`)
-- [ ] WS-10 ClojureScript Platform Parity (`ws/10-cljs-platform-parity`)
-- [ ] WS-11 Service Pieces (umbrella)
-  - [ ] 11A OAuth provider (`ws/11a-oauth-provider`)
-  - [ ] 11B Durable repo storage (`ws/11b-repo-storage`)
-  - [ ] 11C Stream server (`ws/11c-stream-server`)
-  - [ ] 11D PLC directory decision memo (`ws/11d-plc-directory`)
+- [ ] WS-10 ClojureScript Platform Parity (`ws/10-cljs-platform-parity`) — not started; all of its upstream blockers (WS-05 ws runtime, WS-07 datetime signatures, WS-09 eval-free lexicon) have landed
+- [x] WS-11 Service Pieces (umbrella) — 11A–11C merged to `redesign` (PRs #22–#25); 11D dropped by decision
+  - [x] 11A OAuth provider (`ws/11a-oauth-provider`)
+  - [x] 11B Durable repo storage (`ws/11b-repo-storage`) — optional M4 (S3 blobstore) not built
+  - [x] 11C Stream server (`ws/11c-stream-server`)
+  - [ ] 11D PLC directory decision memo (`ws/11d-plc-directory`) — dropped by decision (memo written, then removed in commit `41f23bf`; deferring the PLC directory is a scope call, not a standing document)

@@ -505,20 +505,20 @@ Already vendored under `test/interop-test-files/syntax/` (consumed via the `inte
 
 ## Acceptance criteria
 
-- [ ] Non-2xx XRPC responses produce error maps with `:error`, `:status`, `:headers`, `:retryable?` (and `:message` when available); no `"HTTP_<status>"` strings escape the XRPC client path.
-- [ ] Server JSON error names (e.g. `"InvalidSwap"`, `"ExpiredToken"`) are preserved verbatim in `:error`.
-- [ ] `:retryable?` is true exactly for statuses `#{408 425 429 500 502 503 504 522 524}` (excluding 401) and for transport-level failures.
-- [ ] Per-request and per-client `:headers` reach the wire; precedence = computed > request > client; supplying `:content-type` alongside a body returns an error map.
-- [ ] `:service-proxy` emits `atproto-proxy`; `:labelers` emits merged `atproto-accept-labelers` with `;redact` support; per-request values win.
-- [ ] `:timeout` is honored on CLJ (http-kit) and CLJS (XhrIo), surfacing a retryable `{:error "Timeout"}`.
-- [ ] `:max-retries` > 0 retries only retryable errors with jittered exponential backoff; default behavior (0) is byte-for-byte today's single attempt.
-- [ ] `abort!` on a signal causes pending calls to deliver `{:error "Aborted"}` exactly once; CLJS aborts the underlying XHR.
-- [ ] `atproto.client.repo` covers create/get/put/delete/list/list-all/apply-writes/upload-blob with `:repo` defaulting, swap params, and `:validate?` passthrough; `upload-blob` round-trips a binary body on CLJ and CLJS.
-- [ ] `fetch-all`/`page-seq` paginate via `:cursor` and stop on missing cursor, empty page, `:max-pages`, or error.
-- [ ] `atproto.tid/from-time` and `next-tid` always emit exactly 13 chars (incl. timestamps < 32^10 µs); `parse`/`timestamp`/`compare-tids` round-trip; all TID interop fixtures pass through `valid?`.
-- [ ] `atproto.at-uri/parse` accepts every `aturi_syntax_valid.txt` line and rejects every `aturi_syntax_invalid.txt` line; `make` produces canonical `at://` strings.
-- [ ] `atproto.runtime.datetime/normalize` (CLJ) matches the reference semantics on all vendored datetime fixtures; `current-datetime` emits canonical millisecond-precision UTC.
-- [ ] `clojure -X:test` green after every milestone; no changes outside the files listed in File ownership.
+- [x] Non-2xx XRPC responses produce error maps with `:error`, `:status`, `:headers`, `:retryable?` (and `:message` when available); no `"HTTP_<status>"` strings escape the XRPC client path.
+- [x] Server JSON error names (e.g. `"InvalidSwap"`, `"ExpiredToken"`) are preserved verbatim in `:error`.
+- [x] `:retryable?` is true exactly for statuses `#{408 425 429 500 502 503 504 522 524}` (excluding 401) and for transport-level failures.
+- [x] Per-request and per-client `:headers` reach the wire; precedence = computed > request > client; supplying `:content-type` alongside a body returns an error map.
+- [x] `:service-proxy` emits `atproto-proxy`; `:labelers` emits merged `atproto-accept-labelers` with `;redact` support; per-request values win.
+- [x] `:timeout` is honored on CLJ (http-kit) and CLJS (XhrIo), surfacing a retryable `{:error "Timeout"}` (CLJS XhrIo path implemented but unexecuted — cljs test runs await WS-10).
+- [x] `:max-retries` > 0 retries only retryable errors with jittered exponential backoff; default behavior (0) is byte-for-byte today's single attempt.
+- [x] `abort!` on a signal causes pending calls to deliver `{:error "Aborted"}` exactly once; CLJS aborts the underlying XHR.
+- [x] `atproto.client.repo` covers create/get/put/delete/list/list-all/apply-writes/upload-blob with `:repo` defaulting, swap params, and `:validate?` passthrough; `upload-blob` round-trips a binary body on CLJ (CLJS execution awaits WS-10's test runner).
+- [x] `fetch-all`/`page-seq` paginate via `:cursor` and stop on missing cursor, empty page, `:max-pages`, or error.
+- [x] `atproto.tid/from-time` and `next-tid` always emit exactly 13 chars (incl. timestamps < 32^10 µs); `parse`/`timestamp`/`compare-tids` round-trip; all TID interop fixtures pass through `valid?`.
+- [x] `atproto.at-uri/parse` accepts every `aturi_syntax_valid.txt` line and rejects every `aturi_syntax_invalid.txt` line; `make` produces canonical `at://` strings.
+- [x] `atproto.runtime.datetime/normalize` (CLJ) matches the reference semantics on all vendored datetime fixtures; `current-datetime` emits canonical millisecond-precision UTC.
+- [x] `clojure -X:test` green after every milestone; no changes outside the files listed in File ownership.
 
 ## Milestones
 

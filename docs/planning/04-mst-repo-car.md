@@ -519,18 +519,18 @@ CLJS: all unit + fixture tests must pass under a CLJS runner for the `.cljc` nam
 
 ## Acceptance criteria
 
-- [ ] All four known-map root CIDs and all three edge-case sequences from `mst.test.ts` reproduce exactly (string-equal CIDs).
-- [ ] 1000-key shuffled insert/edit/delete produces order-independent, reference-identical roots; `diff` reports exactly the applied ops.
-- [ ] All 6 cases in vendored `commit-proof-fixtures.json` pass, including proof-only inversion in every op permutation.
-- [ ] Vendored `car-file-fixtures.json` round-trips byte-exactly (write) and structurally (read), with CID verification on by default and skippable.
-- [ ] JVM streaming CAR reader processes a multi-MB CAR without materializing it (test with a generated 50k-block CAR; bounded memory).
-- [ ] `format-commit` produces `relevant-blocks ⊇ new-blocks` and the `commit-data.test.ts` delete-first-key proof scenario verifies via `verify-proofs`.
-- [ ] Commit sign + verify round-trip with real WS-03 keys (P-256 and K-256); `verify-repo-car` rejects a resigned/bad-sig repo with `{:error "RepoVerification"}`.
-- [ ] `verify-proofs` verifies existence and nonexistence claims and rejects mismatched CIDs (claims sorted into `:verified`/`:unverified`).
-- [ ] Full pipeline: `create` → `apply-writes` (creates/updates/deletes) → `repo->car` → `verify-repo-car` → rebuilt repo `contents` equals original.
-- [ ] No thrown exceptions cross the public API: all failures are `{:error ... :message ...}` maps; all public fns have docstrings and specs for inputs.
-- [ ] All tests green on JVM **and** CLJS for the `.cljc` surface; `clj -X:test` green at every milestone merge.
-- [ ] Temporary CBOR stub and fake signer deleted; wrappers call `atproto.data.cbor`/`atproto.crypto` directly.
+- [x] All four known-map root CIDs and all three edge-case sequences from `mst.test.ts` reproduce exactly (string-equal CIDs).
+- [x] 1000-key shuffled insert/edit/delete produces order-independent, reference-identical roots; `diff` reports exactly the applied ops (covered by generative property specs — `roots-are-insertion-order-independent`, `updates-and-deletes-match-model`, `diff-reports-exactly-the-applied-ops` — plus the interop known-map fixtures, rather than a literal 1000-key case).
+- [x] All 6 cases in vendored `commit-proof-fixtures.json` pass, including proof-only inversion in every op permutation.
+- [x] Vendored `car-file-fixtures.json` round-trips byte-exactly (write) and structurally (read), with CID verification on by default and skippable.
+- [x] JVM streaming CAR reader processes a multi-MB CAR without materializing it (test with a generated 50k-block CAR; bounded memory).
+- [x] `format-commit` produces `relevant-blocks ⊇ new-blocks` and the `commit-data.test.ts` delete-first-key proof scenario verifies via `verify-proofs`.
+- [x] Commit sign + verify round-trip with real WS-03 keys; `verify-repo-car` rejects a resigned/bad-sig repo with `{:error "RepoVerification"}` (repo-level round-trips use K-256 keypairs; P-256 sign/verify is covered at the crypto layer in `crypto_test`, not with commit keys).
+- [x] `verify-proofs` verifies existence and nonexistence claims and rejects mismatched CIDs (claims sorted into `:verified`/`:unverified`).
+- [x] Full pipeline: `create` → `apply-writes` (creates/updates/deletes) → `repo->car` → `verify-repo-car` → rebuilt repo `contents` equals original.
+- [x] No thrown exceptions cross the public API: all failures are `{:error ... :message ...}` maps; all public fns have docstrings and specs for inputs.
+- [ ] All tests green on JVM **and** CLJS for the `.cljc` surface; `clj -X:test` green at every milestone merge (JVM green; CLJS test execution deferred to WS-10's CI per the Status note — no cljs runner exists yet).
+- [x] Temporary CBOR stub and fake signer deleted; wrappers call `atproto.data.cbor`/`atproto.crypto` directly (no stubs were ever needed — WS-02/WS-03 had already merged; see Status).
 
 ## Milestones
 

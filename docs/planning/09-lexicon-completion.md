@@ -352,19 +352,19 @@ Created or modified when implemented (repo-relative):
 
 ## Acceptance criteria
 
-- [ ] `(require 'atproto.lexicon.resolver)` succeeds on the JVM; `clj-kondo`/compiler-clean ns form.
-- [ ] `resolve-nsid` resolves a live NSID (e.g. `app.bsky.feed.post`) end-to-end and returns `{:nsid :did :uri :cid :lexicon}`; documented error maps for every failure mode listed above.
-- [ ] DNS authority resolution requires exactly one `did=` TXT record and validates DID syntax (TS parity with `lex-resolver.ts:500-514`).
-- [ ] `install!` writes `app/bsky/feed/post.json`-style files and a manifest; `:deps? true` reaches fixpoint on a schema with refs.
-- [ ] `register-specs!` contains no `eval`; `grep -n "eval" src/atproto/lexicon.cljc` returns nothing (or only comments).
-- [ ] Full test suite passes with ≥ the current 731 assertions; the lexicon translator tests run through the eval-free path.
-- [ ] Binding `*strict*` to `false` accepts lenient datetimes and legacy blob refs; default behavior is byte-for-byte identical to today for all existing test cases.
-- [ ] With `:validate-responses? true`, a schema-invalid successful XRPC response yields `{:error "InvalidResponse" :message ... :explain-data ...}` from the client; error-bodied responses and unknown NSIDs pass through unvalidated; default (`false`) leaves today's client behavior unchanged.
-- [ ] `valid-record-key?` enforces `tid`/`nsid`/`literal:*`/`any` per registered schema.
-- [ ] `lexicon` throws on union refs targeting non-`object` defs within the schema set; tolerates unresolvable refs.
-- [ ] `resources/lexicons/` contains the 95 `com.atproto.*` + 156 `app.bsky.*` schemas, byte-identical to reference commit `b9ef557`, with `manifest.edn` provenance; `manifest.edn` `:files` matches the actual on-disk JSON tree exactly (including any WS-01-vendored `com/atproto/server/*.json`); `script/update-lexicons.sh` regenerates them.
-- [ ] `load-resources!` works from a jar (manifest-driven) and registers all 251 bundled schemas without error.
-- [ ] `embed-resources!` compiles in a cljs build (or, minimally, macro-expands on clj emitting literal data and is covered by a clj-side expansion test if no cljs CI exists yet).
+- [x] `(require 'atproto.lexicon.resolver)` succeeds on the JVM; `clj-kondo`/compiler-clean ns form.
+- [x] `resolve-nsid` resolves a live NSID (e.g. `app.bsky.feed.post`) end-to-end and returns `{:nsid :did :uri :cid :lexicon}`; documented error maps for every failure mode listed above.
+- [x] DNS authority resolution requires exactly one `did=` TXT record and validates DID syntax (TS parity with `lex-resolver.ts:500-514`).
+- [x] `install!` writes `app/bsky/feed/post.json`-style files and a manifest; `:deps? true` reaches fixpoint on a schema with refs.
+- [x] `register-specs!` contains no `eval`; `grep -n "eval" src/atproto/lexicon.cljc` returns nothing (or only comments).
+- [x] Full test suite passes with ≥ the current 731 assertions; the lexicon translator tests run through the eval-free path.
+- [x] Binding `*strict*` to `false` accepts lenient datetimes and legacy blob refs; default behavior is byte-for-byte identical to today for all existing test cases.
+- [x] With `:validate-responses? true`, a schema-invalid successful XRPC response yields `{:error "InvalidResponse" :message ... :explain-data ...}` from the client; error-bodied responses and unknown NSIDs pass through unvalidated; default (`false`) leaves today's client behavior unchanged.
+- [x] `valid-record-key?` enforces `tid`/`nsid`/`literal:*`/`any` per registered schema.
+- [x] `lexicon` throws on union refs targeting non-`object` defs within the schema set; tolerates unresolvable refs.
+- [x] `resources/lexicons/` contains the 95 `com.atproto.*` + 156 `app.bsky.*` schemas, byte-identical to reference commit `b9ef557`, with `manifest.edn` provenance; `manifest.edn` `:files` matches the actual on-disk JSON tree exactly (including any WS-01-vendored `com/atproto/server/*.json`); `script/update-lexicons.sh` regenerates them.
+- [x] `load-resources!` works from a jar (manifest-driven) and registers all 251 bundled schemas without error.
+- [x] `embed-resources!` compiles in a cljs build (or, minimally, macro-expands on clj emitting literal data and is covered by a clj-side expansion test if no cljs CI exists yet).
 
 ## Milestones
 
