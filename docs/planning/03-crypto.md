@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented (PR1–PR4 merged to `redesign`: runtime.crypto fixes, atproto.crypto ECDSA/did:key, compact JWS parse/verify/sign, generative property tests) |
 | **Priority** | P0 |
 | **Estimated size** | M |
 | **Branch** | ws/03-crypto |

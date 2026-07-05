@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Planning |
+| **Status** | Implemented (merged to `redesign`; see commits "Implement WS-01: auth & session lifecycle" and "Align auth & session lifecycle with the reference implementation") |
 | **Priority** | P0 |
 | **Estimated size** | M |
 | **Branch** | ws/01-auth-session-lifecycle |

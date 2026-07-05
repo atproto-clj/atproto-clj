@@ -1,80 +1,88 @@
 (ns atproto.jetstream
+  "Jetstream consumer (JSON firehose; see bluesky-social/jetstream).
+
+  Connection management is built on atproto.runtime.ws (exponential backoff
+  with jitter, heartbeat dead-connection detection, per-connect URL
+  re-resolution), so cursors survive reconnects and a silently dead TCP
+  connection no longer hangs the consumer.
+
+  Events are placed on a caller-supplied channel as parsed JSON maps with
+  keyword keys (:time_us, :did, :kind, :commit, ...). With :typed? true
+  they are instead parsed into :kind-keyed maps matching
+  atproto.sync.firehose where applicable:
+
+    {:kind :create | :update | :delete
+     :did \"did:...\" :time-us n :collection \"...\" :rkey \"...\" :rev \"...\"
+     :uri \"at://did/coll/rkey\"
+     :record {...} :cid <cid>}     ;; :create/:update only
+    {:kind :identity :did :time-us :seq :time :handle}
+    {:kind :account  :did :time-us :seq :time :active :status}
+    {:kind :unknown  :raw <original map>}  ;; forward-compatible passthrough
+
+  Zstd-compressed mode (Jetstream's compress=true) is not implemented:
+  it requires the custom zstd dictionary from the external
+  bluesky-social/jetstream repository; :compress? true returns
+  {:error \"UnsupportedOption\"} (WS-05 planning doc, risk 3)."
   (:require [charred.api :as json]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.core.async :as a]
-            [clojure.tools.logging :as log])
-  (:import [java.net.http HttpClient WebSocket WebSocket$Listener]
-           [java.net URI]
-           [java.time Duration Instant]))
+            [atproto.data :as data]
+            [atproto.data.json :as data-json]
+            [atproto.runtime.cast :as cast]
+            [atproto.runtime.ws :as ws]
+            [atproto.sync.cursor :as cursor])
+  (:import [java.time Instant]))
 
-(defrecord JetstreamListener [^StringBuilder sb ch start-ch]
-  WebSocket$Listener
-  (onOpen [this websocket]
-    (log/info "websocket listener opened")
-    (a/go (a/<! start-ch) (.request websocket 1)))
+(set! *warn-on-reflection* true)
 
-  (onClose [this websocket status reason]
-    (a/close! ch)
-    (log/info "websocket listener closed" {:status status :reason reason}))
+(def default-host "jetstream1.us-east.bsky.network")
 
-  (onError [this websocket error]
-    (a/close! ch)
-    (log/error "websocket listener error" error))
+(s/def ::host string?)
+(s/def ::cursor int?)
+(s/def ::wanted-collections (s/coll-of string?))
+(s/def ::cursor-store cursor/cursor-store?)
+(s/def ::typed? boolean?)
+(s/def ::compress? boolean?)
+(s/def ::close? boolean?)
+(s/def ::ws-opts map?)
+(s/def ::consume-options
+  (s/keys :opt-un [::host ::cursor ::wanted-collections ::cursor-store
+                   ::typed? ::compress? ::close? ::ws-opts]))
 
-  (onText [this websocket chars last]
-    (try
-      (.append sb chars)
-      (when last
-        (a/>!! ch (str sb))
-        (.setLength sb 0))
-      (.request websocket 1))))
+(s/def ::kind #{:create :update :delete :identity :account :unknown})
+(s/def ::did string?)
+(s/def ::time-us (s/nilable int?))
+(s/def ::typed-event
+  (s/and (s/keys :req-un [::kind])
+         (fn [{:keys [kind] :as event}]
+           (case kind
+             (:create :update) (and (:did event) (:collection event)
+                                    (:rkey event) (contains? event :record))
+             :delete (and (:did event) (:collection event) (:rkey event))
+             (:identity :account) (some? (:did event))
+             :unknown (contains? event :raw)))))
 
-(defn- ^WebSocket connect
-  [uri ch retries max-retries]
-  (log/info "connecting to" uri)
-  (try
-    (let [start-ch (a/promise-chan)
-          listener (->JetstreamListener (StringBuilder.) ch start-ch)
-          socket-promise (-> (HttpClient/newHttpClient)
-                           (.newWebSocketBuilder)
-                           (.connectTimeout (Duration/ofSeconds 30))
-                           (.buildAsync uri listener))
-          socket @socket-promise]
-      (log/info "connected to" (str uri))
-      (a/>!! start-ch :ok)
-      socket)
-    (catch Exception e
-      (if (< retries max-retries)
-        (let [wait-time (int (Math/pow 3 retries))]
-          (log/warn "Connection failed: retrying in" wait-time "seconds" e)
-          (Thread/sleep (int (* 1000 wait-time)))
-          (connect uri ch (inc retries) max-retries))
-        (do
-          (log/error "Connection failed" (str uri) e)
-          (a/close! ch)
-          (throw e))))))
+(defn- base-url
+  "Jetstream endpoint for a :host option; bare hostnames get wss://, and a
+  full ws://.../wss:// URL is used as-is (useful for tests)."
+  [host]
+  (if (str/includes? host "://")
+    (str/replace host #"/+$" "")
+    (str "wss://" host)))
 
-(defn- uri
-  [& {:keys [host wanted-collections cursor]}]
-  (let [params
-        (cond-> []
-          cursor
-          (conj ["cursor" (str cursor)])
-          (seq wanted-collections)
-          (concat (map #(vector "wantedCollections" %) wanted-collections)))]
-    (URI.
-      (str "wss://" host "/subscribe"
-        (when-not (empty? params)
-          (str "?" (str/join "&"
-                     (map (fn [[k v]] (str k "=" v))
-                       params))))))))
+(defn- subscribe-url
+  [{:keys [host wanted-collections]} cursor]
+  (let [params (cond-> []
+                 cursor (conj (str "cursor=" cursor))
+                 (seq wanted-collections)
+                 (into (map #(str "wantedCollections=" %) wanted-collections)))]
+    (str (base-url host) "/subscribe"
+         (when (seq params)
+           (str "?" (str/join "&" params))))))
 
-(def ^:private parse-json-xf
-  (let [parse-fn (json/parse-json-fn
-                   {:key-fn keyword
-                    :async? false
-                    :bufsize 8192})]
-    (map parse-fn)))
+(def ^:private parse-json
+  (json/parse-json-fn {:key-fn keyword :async? false :bufsize 8192}))
 
 (defn current-time-us
   "Helper function to return the current time in microseconds"
@@ -88,54 +96,183 @@
         nanoseconds (* 1000 (- us (* seconds (long 1e6))))]
     (str (Instant/ofEpochSecond seconds nanoseconds))))
 
+(defn typed-event
+  "Parse a raw Jetstream JSON event map into a :kind-keyed typed event
+  (shapes in the ns docstring). Unknown kinds pass through as
+  {:kind :unknown :raw event}."
+  [{:keys [did time_us kind commit identity account] :as event}]
+  (case kind
+    "commit"
+    (let [{:keys [operation collection rkey rev record cid]} commit
+          op-kind (case operation
+                    "create" :create
+                    "update" :update
+                    "delete" :delete
+                    nil)]
+      (if-not op-kind
+        {:kind :unknown :raw event}
+        (cond-> {:kind op-kind
+                 :did did
+                 :time-us time_us
+                 :collection collection
+                 :rkey rkey
+                 :rev rev
+                 :uri (str "at://" did "/" collection "/" rkey)}
+          (some? record) (assoc :record (data-json/decode record))
+          cid (assoc :cid (or (data/parse-cid cid) cid)))))
+
+    "identity"
+    (cond-> {:kind :identity
+             :did did
+             :time-us time_us
+             :seq (:seq identity)
+             :time (:time identity)}
+      (:handle identity) (assoc :handle (:handle identity)))
+
+    "account"
+    (cond-> {:kind :account
+             :did did
+             :time-us time_us
+             :seq (:seq account)
+             :time (:time account)
+             :active (:active account)}
+      (:status account) (assoc :status (:status account)))
+
+    {:kind :unknown :raw event}))
+
+(defn- put-event!
+  "Blocking put that periodically re-checks for shutdown, so a consumer
+  that stopped taking (with :close? false) cannot park the listener thread
+  forever. Returns true when the event was accepted."
+  [state ch event]
+  (loop []
+    (if (:stopped? @state)
+      false
+      (let [res (a/alt!! [[ch event]] ([accepted?] (boolean accepted?))
+                         (a/timeout 200) ::retry)]
+        (if (= ::retry res) (recur) res)))))
+
+(defn- cursor-url-fn
+  "url-fn re-invoked on every (re)connect. A cursor derived from processed
+  events (the store, or the in-memory last event) is rewound by 1µs so no
+  event is missed at the boundary (at-least-once); the caller's initial
+  :cursor is used as-is."
+  [opts cursor-store initial-cursor last-event-cursor]
+  (fn [cb]
+    (let [finish (fn [stored]
+                   (let [processed (or stored @last-event-cursor)]
+                     (cb (subscribe-url opts (if processed
+                                               (dec (long processed))
+                                               initial-cursor)))))]
+      (if cursor-store
+        (cursor/get-cursor cursor-store
+                           (fn [{:keys [error cursor] :as resp}]
+                             (if error (cb resp) (finish cursor))))
+        (finish nil)))))
+
 (defn consume
   "Place messages from the jetstream on the supplied channel. Reconnects
    automatically if the socket closes unexpectedly.
 
    Returns a control channel. Closing the control channel halts processing.
+   (With :compress? true, returns {:error \"UnsupportedOption\"} instead —
+   see the namespace docstring.)
 
    Options:
 
    - host (default: jetstream1.us-east.bsky.network)
    - cursor (value in μs) (default: none)
    - wanted-collections (coll of collection ids) (default: nil (i.e. everything))
-   - max-retries (default: 4)
-   - close? (default: true) - close the ch upon disconnection?"
-  [ch & {:keys [host cursor control-ch max-retries wanted-collections close?]
-         :or {host "jetstream1.us-east.bsky.network"
+   - cursor-store (atproto.sync.cursor/CursorStore) — read on every
+     (re)connect, written with :time_us as events are placed on ch;
+     lets consumption resume across restarts (default: none)
+   - typed? — parse events with `typed-event` before placing them on ch
+     (default: false, raw JSON maps)
+   - compress? — Jetstream zstd mode; not implemented, returns
+     {:error \"UnsupportedOption\"}
+   - close? (default: true) - close the ch upon disconnection?
+   - max-retries (deprecated, ignored) — reconnection now uses capped
+     exponential backoff with jitter and retries until the control channel
+     is closed
+   - ws-opts — extra options for atproto.runtime.ws/connect
+     (:max-reconnect-ms, :heartbeat-interval-ms, ...)"
+  [ch & {:keys [host cursor control-ch max-retries wanted-collections close?
+                cursor-store typed? compress? ws-opts]
+         :or {host default-host
               control-ch (a/chan)
-              max-retries 4
-              close? true}}]
-  (let [opts {:host host
-              :cursor cursor
-              :control-ch control-ch
-              :max-retries max-retries
-              :wanted-collections wanted-collections}
-        listener-ch (a/chan 1 parse-json-xf identity)
-        socket (connect (uri opts) listener-ch 0 max-retries)
-        last-cursor (volatile! (or cursor 0))]
-    (a/go-loop []
-      (a/alt!
-        control-ch ([cmd] (if cmd
-                            (do (log/warn "Unknown command:" cmd)  (recur))
-                            (do
-                              (log/info "Shutdown command recieved")
-                              (a/close! listener-ch)
-                              (.sendClose socket WebSocket/NORMAL_CLOSURE "complete")
-                              (.abort socket)
-                              (when close? (a/close! ch)))))
-        listener-ch ([data]
-                     (if-not data
-                       (do
-                         (log/info "Lost connection at" (us-str @last-cursor))
-                         (consume ch (assoc opts :cursor (- @last-cursor 1))))
-                       (do
-                         (when-let [us (:time_us data)]
-                           (vreset! last-cursor us))
-                         (a/>! ch data)
-                         (recur))))
-        :priority true))
-    control-ch))
+              close? true}
+         :as options}]
+  (when-not (s/valid? ::consume-options (dissoc options :control-ch :max-retries))
+    (throw (ex-info "Invalid Jetstream options."
+                    {:error "InvalidConfig"
+                     :message (s/explain-str ::consume-options
+                                             (dissoc options :control-ch :max-retries))})))
+  (if compress?
+    {:error "UnsupportedOption"
+     :message "Jetstream zstd mode is not implemented; consume plain JSON instead."}
+    (let [opts {:host host :wanted-collections wanted-collections}
+          last-event-cursor (volatile! nil)
+          state (atom {:stopped? false :ws nil})
+          on-message
+          (fn [msg]
+            (when (string? msg)
+              (let [event (try
+                            (parse-json msg)
+                            (catch Exception e
+                              (cast/alert {:message "Undecodable Jetstream event."
+                                           :ex e})
+                              nil))]
+                (when (map? event)
+                  ;; Blocking put: backpressures the socket, which requests
+                  ;; one message at a time.
+                  (when (put-event! state ch (if typed? (typed-event event) event))
+                    (when-let [us (:time_us event)]
+                      (vreset! last-event-cursor us)
+                      (when cursor-store
+                        (cursor/set-cursor
+                         cursor-store us
+                         (fn [{:keys [error] :as resp}]
+                           (when error
+                             (cast/alert (assoc resp :message "Jetstream cursor write failed."))))))))))))
+          connect!
+          (fn connect! []
+            (when-not (:stopped? @state)
+              (let [reconnect (fn [info]
+                                (when-not (:stopped? @state)
+                                  (cast/event {:message "Jetstream connection ended; re-subscribing."
+                                               :info info})
+                                  (future
+                                    (Thread/sleep 3000)
+                                    (connect!))))
+                    handle (ws/connect
+                            (merge {:max-reconnect-ms 64000}
+                                   ws-opts
+                                   {:url-fn (cursor-url-fn opts cursor-store
+                                                           cursor last-event-cursor)
+                                    :on-message on-message
+                                    :on-error (fn [{:keys [fatal] :as err}]
+                                                (cast/event {:message "Jetstream websocket error."
+                                                             :error (:error err)})
+                                                (when fatal (reconnect err)))
+                                    :on-close (fn [info]
+                                                (when-not (:stopped? @state)
+                                                  (reconnect info)))}))]
+                (swap! state assoc :ws handle)
+                ;; shutdown may have raced the connect; close the socket it
+                ;; couldn't see.
+                (when (:stopped? @state)
+                  (ws/close! handle)))))]
+      (connect!)
+      (a/go-loop []
+        (let [cmd (a/<! control-ch)]
+          (if (some? cmd)
+            (do (cast/event {:message "Unknown Jetstream command." :command cmd})
+                (recur))
+            ;; control channel closed -> shutdown
+            (let [[{:keys [ws]} _] (swap-vals! state assoc :stopped? true)]
+              (when ws (ws/close! ws))
+              (when close? (a/close! ch))))))
+      control-ch)))
 
 (comment
 
@@ -144,6 +281,11 @@
 
   ;; Subscribe to the jetstream
   (def control-ch (consume events-ch :wanted-collections ["app.bsky.feed.post"]))
+
+  ;; Typed events with a persistent cursor:
+  ;; (require '[atproto.sync.cursor :as cursor])
+  ;; (def store (cursor/memory-store))
+  ;; (def control-ch (consume events-ch :typed? true :cursor-store store))
 
   ;; Consume events
   (a/go-loop [count 0]
