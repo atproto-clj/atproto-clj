@@ -6,6 +6,7 @@
   '[statusphere.db-test
     statusphere.auth-test
     statusphere.views-test
+    statusphere.ingester-test
     statusphere.routes-test])
 
 (defn -main [& _]
