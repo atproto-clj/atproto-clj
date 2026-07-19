@@ -92,12 +92,13 @@
   "The most recently indexed status for this author DID, or nil.
   Scans one author's statuses — fine at example scale."
   [db did]
-  (->> (d/q '[:find [(pull ?s pattern) ...]
-              :in $ ?did pattern
-              :where [?s :status/author-did ?did]]
-            db did status-pull)
-       (sort-by :status/indexed-at #(compare %2 %1))
-       (first)))
+  (when did
+    (->> (d/q '[:find [(pull ?s pattern) ...]
+                :in $ ?did pattern
+                :where [?s :status/author-did ?did]]
+              db did status-pull)
+         (sort-by :status/indexed-at #(compare %2 %1))
+         (first))))
 
 (defn upsert-status-tx
   "Transaction data for a status map with keys

@@ -9,6 +9,7 @@
             [io.pedestal.http.jetty :as jetty]
             [atproto.lexicon :as lexicon]
             [atproto.runtime.cast :as cast]
+            [statusphere.auth :as auth]
             [statusphere.db :as db]
             [statusphere.routes :as routes]))
 
@@ -30,16 +31,28 @@
     (assoc this :conn nil)))
 
 ;; -----------------------------------------------------------------------------
+;; OAuth client
+;; -----------------------------------------------------------------------------
+
+(defrecord OauthClient [config datomic client]
+  component/Lifecycle
+  (start [this]
+    (if client this (assoc this :client (auth/client config (:conn datomic)))))
+  (stop [this]
+    (assoc this :client nil)))
+
+;; -----------------------------------------------------------------------------
 ;; Web server
 ;; -----------------------------------------------------------------------------
 
-(defrecord WebServer [config datomic connector]
+(defrecord WebServer [config datomic oauth-client connector]
   component/Lifecycle
   (start [this]
     (if connector
       this
-      (let [app       {:conn   (:conn datomic)
-                       :config config}
+      (let [app       {:conn         (:conn datomic)
+                       :oauth-client (:client oauth-client)
+                       :config       config}
             connector (-> (routes/connector-map config app)
                           (jetty/create-connector nil)
                           (pconn/start!))]
@@ -68,6 +81,8 @@
   [config]
   (register-lexicons!)
   (component/system-map
-   :datomic (map->Datomic {:uri (:db-uri config)})
-   :http    (component/using (map->WebServer {:config config})
-                             [:datomic])))
+   :datomic      (map->Datomic {:uri (:db-uri config)})
+   :oauth-client (component/using (map->OauthClient {:config config})
+                                  [:datomic])
+   :http         (component/using (map->WebServer {:config config})
+                                  [:datomic :oauth-client])))

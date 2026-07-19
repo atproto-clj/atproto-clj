@@ -4,6 +4,7 @@
 
 (def test-namespaces
   '[statusphere.db-test
+    statusphere.auth-test
     statusphere.views-test
     statusphere.routes-test])
 
