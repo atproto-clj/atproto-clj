@@ -160,11 +160,11 @@ Five components. Factoring rules, applied uniformly:
 - **Views are pure**: data in, hiccup out. No I/O in `views.clj` — handlers resolve handles,
   fetch profiles, and query Datomic, then pass finished data to the view.
 - **Async by default.** Handlers are functions of `request → channel-of-response`;
-  interceptors park on channels rather than block; every SDK/Datomic bridge lives in
-  `statusphere.async` (see "Async model" below). Blocking code is allowed only on threads
-  the app owns (`a/thread`, the ingester's consumer thread) plus two documented sync
-  islands: peer-local Datomic reads (`d/db`/`d/q` — in-memory, small here) and the OAuth
-  `Store` protocol (synchronous by contract; see Auth).
+  interceptors park on channels rather than block; SDK calls and Datomic writes are awaited
+  with two inline idioms (see "Async model" below) rather than a wrapper layer. Blocking
+  code is allowed only on threads the app owns (`a/thread`, the ingester's consumer thread)
+  plus two documented sync islands: peer-local Datomic reads (`d/db`/`d/q` — in-memory,
+  small here) and the OAuth `Store` protocol (synchronous by contract; see Auth).
 - **The system map is the only place wiring happens.** Nothing reaches into a global; the one
   deliberate exception is `lexicon/register-specs!` (a global, idempotent spec registry —
   called once in `system.clj` when constructing the system, and safe to re-run on every
@@ -186,7 +186,6 @@ examples/statusphere-server/
 └── src/statusphere/
     ├── main.clj                   ;; -main: read config, start system, block
     ├── system.clj                 ;; system map + component defs (~all lifecycle code)
-    ├── async.clj                  ;; SDK/Datomic → core.async bridges (<call, <transact)
     ├── db.clj                     ;; Datomic schema (data), queries, tx builders
     ├── auth.clj                   ;; OAuth client construction + Datomic Store impls
     ├── ingester.clj               ;; jetstream event handling + cursor store
@@ -195,7 +194,7 @@ examples/statusphere-server/
     └── views.clj                  ;; hiccup pages (pure)
 ```
 
-Ten source files. `system.clj` owns *all* `component/Lifecycle` implementations (they are
+Nine source files. `system.clj` owns *all* `component/Lifecycle` implementations (they are
 each a handful of lines once the logic lives elsewhere); the other namespaces export plain
 functions. This keeps "what starts and stops, in what order" readable in one place.
 
@@ -230,27 +229,22 @@ required (auto-escaping via `hiccup2.core/html`).
 
 ### Async model
 
-One tiny namespace, `statusphere.async`, owns every bridge between the app's three async
-worlds — the SDK's callback convention, Datomic's futures, and core.async:
+No wrapper namespace — bridging the SDK's callback convention and Datomic's futures into
+core.async takes one form each, written inline at every call site:
 
 ```clojure
-(defn <call
-  "Invoke an SDK async fn with a fresh promise-chan as its :channel option and
-   return that channel: (<call oauth-client/authorize client handle)."
-  [f & args]
-  (let [ch (a/promise-chan)]
-    (apply f (concat args [:channel ch]))
-    ch))
+;; SDK call inside a go block: every SDK async fn accepts a :channel option and
+;; returns that channel, so a promise-chan composes directly with a/<! —
+(a/<! (oauth-client/restore client did :channel (a/promise-chan)))
 
-(defn <transact
-  "d/transact-async bridged to core.async: a channel delivering the tx result
-   (or {:error ...}). The deref of Datomic's future happens on an a/thread, so
-   no shared thread ever parks on it."
-  [conn tx-data] ...)
+;; Datomic write inside a go block: the deref of Datomic's future parks a
+;; dedicated a/thread, never a shared dispatch thread —
+(a/<! (a/thread @(d/transact-async conn tx-data)))
 ```
 
-Everything downstream is uniform: awaiting an SDK call or a Datomic write is
-`(a/<! (<call ...))` / `(a/<! (<transact ...))` inside a `go` block.
+These two idioms are the *only* sanctioned ways to wait on the SDK or on a Datomic write
+from a request path; a bare `@`/`deref`/`<!!` in a handler or interceptor is a bug by
+definition.
 
 Pedestal's async contract (per the
 [0.8 async guide](https://pedestal.io/pedestal/0.8/guides/async.html)): an interceptor that
@@ -258,7 +252,7 @@ returns a channel from `:enter`/`:leave` parks the chain, and the channel must d
 updated context map (one value). The operational constraint that shapes the rules above:
 once a chain has gone async, subsequent interceptors run on the core.async dispatch pool
 (default 8 threads) — one blocking call there degrades the whole server, which is why
-blocking primitives are confined to `async.clj` internals and app-owned threads.
+blocking is confined to `a/thread` bodies and app-owned threads.
 
 ## Datomic design
 
@@ -385,7 +379,8 @@ Two app interceptors, defined in `routes.clj`, closed over the started component
 (def restore-viewer
   "When the browser session carries a :did, restore the OAuth session and
    attach :viewer {:did .. :client <atproto client>} to the request.
-   Async: :enter returns a go block awaiting (<call oauth-client/restore ...).
+   Async: :enter returns a go block awaiting
+   (oauth-client/restore client did :channel (a/promise-chan)).
    On SessionNotFound / refresh failure: log via cast, clear the browser
    session (expired cookie in the response), continue logged-out."
   ...)
@@ -405,10 +400,10 @@ blocks; a ~5-line `async-handler` adapter turns one into a Pedestal interceptor 
 `:enter` returns a channel delivering `(assoc context :response ...)`. Two rules keep this
 honest:
 
-- Await SDK calls with `(a/<! (<call f ...))` — never deref inside a `go`.
-- Datomic writes go through `(a/<! (<transact conn tx)))`; any other blocking work hops
-  through `a/thread` the same way. (Peer-local reads — `d/db`, the small `d/q`s in
-  `db.clj` — stay inline; they don't do I/O.)
+- Await SDK calls with the `:channel (a/promise-chan)` idiom — never deref inside a `go`.
+- Datomic writes go through `(a/<! (a/thread @(d/transact-async conn tx)))`; any other
+  blocking work hops through `a/thread` the same way. (Peer-local reads — `d/db`, the
+  small `d/q`s in `db.clj` — stay inline; they don't do I/O.)
 
 Sketch of the interesting one:
 
@@ -423,16 +418,18 @@ Sketch of the interesting one:
       (if-not (binding [lexicon/*schema-validate* true]   ;; sync validation — no park inside the binding
                 (s/valid? ::lexicon/record record))
         (redirect "/?error=invalid-status")
-        (let [{:keys [error uri]} (a/<! (<call at/procedure (:client viewer)
+        (let [{:keys [error uri]} (a/<! (at/procedure (:client viewer)
                                           {:nsid "com.atproto.repo.putRecord"
                                            :body {:repo       (:did viewer)
                                                   :collection "xyz.statusphere.status"
                                                   :rkey       (tid/next-tid)
                                                   :record     record
-                                                  :validate   false}}))] ;; PDS doesn't know our lexicon
+                                                  :validate   false}} ;; PDS doesn't know our lexicon
+                                          :channel (a/promise-chan)))]
           (if error
             (do (cast/alert ...) (redirect "/?error=pds"))
-            (do (a/<! (<transact conn (db/upsert-status-tx (optimistic uri viewer record))))
+            (do (a/<! (a/thread @(d/transact-async conn (db/upsert-status-tx
+                                                          (optimistic uri viewer record)))))
                 (redirect "/"))))))))
 ```
 
@@ -444,8 +441,8 @@ which is the server-side guard that the posted form value really is a single emo
 The home handler composes, in one `go` block: `db/recent-statuses` →
 `(a/<! (handles/<resolve-all ...))` (distinct author DIDs → handle map) → for a viewer,
 `db/current-status` + a best-effort profile fetch (`com.atproto.repo.getRecord` on
-`app.bsky.actor.profile/self` via `<call`, validated against the bundled lexicon, falling
-back to the handle on any failure) → `views/home`.
+`app.bsky.actor.profile/self` via the same `:channel` idiom, validated against the bundled
+lexicon, falling back to the handle on any failure) → `views/home`.
 
 ### Views
 
@@ -525,8 +522,8 @@ transact) is noted in Risks and not built.
 (defn <resolve-all [resolver dids] ...) ;; channel of {did handle}: go block, sequential a/<! per distinct did
 ```
 
-Both return channels — resolution is an SDK async call (`<call identity/resolve-identity
-... :cache cache`), so no thread parks on DNS/HTTP. The SDK's stale-while-revalidate cache
+Both return channels — resolution is an SDK async call (`identity/resolve-identity ...
+:cache cache :channel (a/promise-chan)`), so no thread parks on DNS/HTTP. The SDK's stale-while-revalidate cache
 (`atproto.identity.cache/default-policy`) means a page render costs at most one live
 resolution per never-seen DID, and repeat renders are cache hits. Views receive the
 finished `{did handle}` map. Durable (Datomic-backed) handle
@@ -603,9 +600,10 @@ All tests run against `datomic:mem://test-<gensym>` — no transactor, no networ
       strings HTML-escaped.
 - [ ] No component reaches into another's internals; `db.clj`, `views.clj`, `handles.clj`,
       `ingester/handle-event!` all callable from a bare REPL with no system running.
-- [ ] No blocking on go-dispatch/interceptor threads: SDK calls and Datomic writes are
-      awaited via channels (`<call`/`<transact`); blocking code lives only on `a/thread`s
-      the app owns and in the documented sync islands.
+- [ ] No blocking on go-dispatch/interceptor threads: SDK calls awaited via
+      `:channel (a/promise-chan)`, Datomic writes via `a/thread` + `d/transact-async`;
+      blocking code lives only on `a/thread`s the app owns and in the documented sync
+      islands.
 - [ ] The existing `examples/statusphere` is untouched; the new app is fully self-contained
       under `examples/statusphere-server/` with `statusphere.*` namespaces.
 
@@ -617,7 +615,7 @@ Small PRs against `main`, each independently green, in order:
    `db.clj` schema/queries/txs, `system.clj` with `:datomic` only, `main.clj`, `user.clj`,
    `db-test`); copies `style.css` and the three needed lexicon JSONs from
    `examples/statusphere`, which is not modified.
-2. **M2 — web shell**: `async.clj` + the `async-handler` adapter, `:http` component
+2. **M2 — web shell**: the `async-handler` adapter (in `routes.clj`), `:http` component
    (service-map vs `io.pedestal.connector` decided here), routes/views for a logged-out
    home + static css, `views-test`, `routes-test` happy path. App browsable with seed data.
 3. **M3 — OAuth**: `auth.clj` + stores, login/callback/logout routes, `restore-viewer`,
@@ -658,6 +656,7 @@ Small PRs against `main`, each independently green, in order:
 7. **Async's failure mode is a stealthy block.** After the first async interceptor the rest
    of the chain runs on the core.async dispatch pool (default 8 threads); one forgotten
    blocking call — a bare `d/transact`, a deref — can jam every request under load, and it
-   works fine in light testing. Mitigations: all bridging is funneled through `async.clj`
-   (`<call`/`<transact`) so blocking primitives never appear in `routes.clj`/`handles.clj`,
-   and the M2–M5 review checklist includes grepping handlers for `@`/`deref`/`<!!`.
+   works fine in light testing. Mitigation is convention plus review: the two inline idioms
+   in "Async model" are the only sanctioned waits on a request path, and the M2–M5 review
+   checklist includes grepping `routes.clj`/`handles.clj` for `@`/`deref`/`<!!` outside an
+   `a/thread` body.
