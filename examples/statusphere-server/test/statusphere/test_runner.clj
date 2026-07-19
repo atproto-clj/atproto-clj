@@ -3,7 +3,9 @@
   (:require [clojure.test :as test]))
 
 (def test-namespaces
-  '[statusphere.db-test])
+  '[statusphere.db-test
+    statusphere.views-test
+    statusphere.routes-test])
 
 (defn -main [& _]
   (apply require test-namespaces)

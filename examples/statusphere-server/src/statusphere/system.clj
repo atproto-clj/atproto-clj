@@ -5,9 +5,12 @@
   functions in the other namespaces."
   (:require [com.stuartsierra.component :as component]
             [datomic.api :as d]
+            [io.pedestal.connector :as pconn]
+            [io.pedestal.http.jetty :as jetty]
             [atproto.lexicon :as lexicon]
             [atproto.runtime.cast :as cast]
-            [statusphere.db :as db]))
+            [statusphere.db :as db]
+            [statusphere.routes :as routes]))
 
 (set! *warn-on-reflection* true)
 
@@ -25,6 +28,26 @@
   (stop [this]
     (when conn (d/release conn))
     (assoc this :conn nil)))
+
+;; -----------------------------------------------------------------------------
+;; Web server
+;; -----------------------------------------------------------------------------
+
+(defrecord WebServer [config datomic connector]
+  component/Lifecycle
+  (start [this]
+    (if connector
+      this
+      (let [app       {:conn   (:conn datomic)
+                       :config config}
+            connector (-> (routes/connector-map config app)
+                          (jetty/create-connector nil)
+                          (pconn/start!))]
+        (cast/event {:message (str "Web server listening on port " (:port config))})
+        (assoc this :connector connector))))
+  (stop [this]
+    (when connector (pconn/stop! connector))
+    (assoc this :connector nil)))
 
 ;; -----------------------------------------------------------------------------
 ;; System
@@ -45,4 +68,6 @@
   [config]
   (register-lexicons!)
   (component/system-map
-   :datomic (map->Datomic {:uri (:db-uri config)})))
+   :datomic (map->Datomic {:uri (:db-uri config)})
+   :http    (component/using (map->WebServer {:config config})
+                             [:datomic])))
