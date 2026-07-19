@@ -162,7 +162,8 @@ Five components. Factoring rules, applied uniformly:
 - **Async by default.** Handlers are functions of `request → channel-of-response`;
   interceptors park on channels rather than block; SDK calls and Datomic writes are awaited
   with two inline idioms (see "Async model" below) rather than a wrapper layer. Blocking
-  code is allowed only on threads the app owns (`a/thread`, the ingester's consumer thread)
+  code is allowed only on threads the app owns (`a/io-thread` bodies, the ingester's
+  consumer thread)
   plus two documented sync islands: peer-local Datomic reads (`d/db`/`d/q` — in-memory,
   small here) and the OAuth `Store` protocol (synchronous by contract; see Auth).
 - **The system map is the only place wiring happens.** Nothing reaches into a global; the one
@@ -237,9 +238,12 @@ core.async takes one form each, written inline at every call site:
 ;; returns that channel, so a promise-chan composes directly with a/<! —
 (a/<! (oauth-client/restore client did :channel (a/promise-chan)))
 
-;; Datomic write inside a go block: the deref of Datomic's future parks a
-;; dedicated a/thread, never a shared dispatch thread —
-(a/<! (a/thread @(d/transact-async conn tx-data)))
+;; Datomic write inside a go block: the blocking call runs in a/io-thread —
+;; a virtual thread on JDK 21+, an ordinary thread otherwise — never on a
+;; shared dispatch thread. (Plain d/transact: once a thread blocks anyway,
+;; transact-async buys nothing, and even its "immediate" submit does
+;; connection I/O that doesn't belong on a dispatch thread.)
+(a/<! (a/io-thread @(d/transact conn tx-data)))
 ```
 
 These two idioms are the *only* sanctioned ways to wait on the SDK or on a Datomic write
@@ -252,7 +256,7 @@ returns a channel from `:enter`/`:leave` parks the chain, and the channel must d
 updated context map (one value). The operational constraint that shapes the rules above:
 once a chain has gone async, subsequent interceptors run on the core.async dispatch pool
 (default 8 threads) — one blocking call there degrades the whole server, which is why
-blocking is confined to `a/thread` bodies and app-owned threads.
+blocking is confined to `a/io-thread` bodies and app-owned threads.
 
 ## Datomic design
 
@@ -401,8 +405,8 @@ blocks; a ~5-line `async-handler` adapter turns one into a Pedestal interceptor 
 honest:
 
 - Await SDK calls with the `:channel (a/promise-chan)` idiom — never deref inside a `go`.
-- Datomic writes go through `(a/<! (a/thread @(d/transact-async conn tx)))`; any other
-  blocking work hops through `a/thread` the same way. (Peer-local reads — `d/db`, the
+- Datomic writes go through `(a/<! (a/io-thread @(d/transact conn tx)))`; any other
+  blocking work hops through `a/io-thread` the same way. (Peer-local reads — `d/db`, the
   small `d/q`s in `db.clj` — stay inline; they don't do I/O.)
 
 Sketch of the interesting one:
@@ -428,8 +432,8 @@ Sketch of the interesting one:
                                           :channel (a/promise-chan)))]
           (if error
             (do (cast/alert ...) (redirect "/?error=pds"))
-            (do (a/<! (a/thread @(d/transact-async conn (db/upsert-status-tx
-                                                          (optimistic uri viewer record)))))
+            (do (a/<! (a/io-thread @(d/transact conn (db/upsert-status-tx
+                                                       (optimistic uri viewer record)))))
                 (redirect "/"))))))))
 ```
 
@@ -601,9 +605,9 @@ All tests run against `datomic:mem://test-<gensym>` — no transactor, no networ
 - [ ] No component reaches into another's internals; `db.clj`, `views.clj`, `handles.clj`,
       `ingester/handle-event!` all callable from a bare REPL with no system running.
 - [ ] No blocking on go-dispatch/interceptor threads: SDK calls awaited via
-      `:channel (a/promise-chan)`, Datomic writes via `a/thread` + `d/transact-async`;
-      blocking code lives only on `a/thread`s the app owns and in the documented sync
-      islands.
+      `:channel (a/promise-chan)`, Datomic writes via `a/io-thread` + `d/transact`;
+      blocking code lives only on `a/io-thread` bodies, threads the app owns, and the
+      documented sync islands.
 - [ ] The existing `examples/statusphere` is untouched; the new app is fully self-contained
       under `examples/statusphere-server/` with `statusphere.*` namespaces.
 
@@ -659,4 +663,4 @@ Small PRs against `main`, each independently green, in order:
    works fine in light testing. Mitigation is convention plus review: the two inline idioms
    in "Async model" are the only sanctioned waits on a request path, and the M2–M5 review
    checklist includes grepping `routes.clj`/`handles.clj` for `@`/`deref`/`<!!` outside an
-   `a/thread` body.
+   `a/io-thread` body.
