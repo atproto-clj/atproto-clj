@@ -9,6 +9,7 @@
   awaited via :channel (a/promise-chan), Datomic writes via
   (a/<! (a/io-thread @(d/transact ...)))."
   (:require [clojure.core.async :as a]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [datomic.api :as d]
             [io.pedestal.connector :as pconn]
@@ -21,12 +22,16 @@
             [io.pedestal.service.resources :as resources]
             [ring.middleware.session.cookie :as cookie]
             [atproto.client :as at]
+            [atproto.lexicon :as lexicon]
             [atproto.oauth.client :as oauth-client]
             [atproto.runtime.cast :as cast]
             [atproto.runtime.json :as json]
+            [atproto.tid :as tid]
             [statusphere.db :as db]
+            [statusphere.handles :as handles]
             [statusphere.views :as views])
-  (:import [java.util Base64]))
+  (:import [java.time Instant]
+           [java.util Base64 Date]))
 
 (set! *warn-on-reflection* true)
 
@@ -96,18 +101,84 @@
 (defn- csrf-token [request]
   (get request csrf/anti-forgery-token))
 
+(defn- valid-record?
+  "Validate against the registered Lexicon schema (not just data-shape):
+  *schema-validate* defaults to false, so bind it around the check."
+  [record]
+  (binding [lexicon/*schema-validate* true]
+    (s/valid? ::lexicon/record record)))
+
+(defn- <display-name
+  "Channel of the viewer's bsky profile displayName (best-effort: nil on
+  any error, or when the record doesn't validate against the bundled
+  app.bsky.actor.profile lexicon)."
+  [{:keys [client did]}]
+  (a/go
+    (let [{:keys [error value]}
+          (a/<! (at/query client
+                          {:nsid   "com.atproto.repo.getRecord"
+                           :params {:repo       did
+                                    :collection "app.bsky.actor.profile"
+                                    :rkey       "self"}}
+                          :channel (a/promise-chan)))]
+      (when (and (not error) (valid-record? value))
+        (:displayName value)))))
+
 (defn home
   [{:keys [app query-params viewer] :as request}]
   (a/go
-    (let [dbv      (d/db (:conn app))
-          statuses (db/recent-statuses dbv 50)]
+    (let [dbv        (d/db (:conn app))
+          statuses   (db/recent-statuses dbv 50)
+          handle-for (a/<! (handles/<resolve-all (:handles app)
+                                                 (map :status/author-did statuses)))
+          viewer     (when viewer
+                       (assoc viewer :display-name (a/<! (<display-name viewer))))]
       (html (views/home {:error      (:error query-params)
                          :viewer     viewer
                          :my-status  (when viewer
                                        (:status/emoji (db/current-status dbv (:did viewer))))
                          :statuses   statuses
-                         :handle-for {}
+                         :handle-for handle-for
                          :csrf-token (csrf-token request)})))))
+
+(defn send-status
+  "Write the status record to the viewer's PDS (the source of truth), then
+  upsert it into the local index optimistically — Jetstream will echo it
+  back as a no-op."
+  [{:keys [app viewer form-params] :as request}]
+  (a/go
+    (if-not viewer
+      (redirect "/login")
+      (let [now    (Instant/now)
+            emoji  (:status form-params)
+            record {:$type     "xyz.statusphere.status"
+                    :status    emoji
+                    :createdAt (str now)}]
+        (if-not (valid-record? record)
+          (redirect "/?error=invalid-status")
+          (let [{:keys [error uri] :as resp}
+                (a/<! (at/procedure (:client viewer)
+                                    {:nsid "com.atproto.repo.putRecord"
+                                     :body {:repo       (:did viewer)
+                                            :collection "xyz.statusphere.status"
+                                            :rkey       (tid/next-tid)
+                                            :record     record
+                                            ;; the PDS doesn't know our lexicon
+                                            :validate   false}}
+                                    :channel (a/promise-chan)))]
+            (if error
+              (do (cast/event {:message "putRecord failed" :error error
+                               :description (:message resp)})
+                  (redirect "/?error=pds"))
+              (do (a/<! (a/io-thread
+                         @(d/transact (:conn app)
+                                      (db/upsert-status-tx
+                                       {:uri        uri
+                                        :author-did (:did viewer)
+                                        :emoji      emoji
+                                        :created-at (Date/from now)
+                                        :indexed-at (Date/from now)}))))
+                  (redirect "/")))))))))
 
 (defn login-page
   [{:keys [query-params] :as request}]
@@ -170,6 +241,7 @@
   (let [common [(inject-app app)]
         viewer (conj common restore-viewer)]
     #{["/"                     :get  (conj viewer (async-handler ::home home))]
+      ["/status"               :post (conj viewer (async-handler ::send-status send-status))]
       ["/login"                :get  (conj common (async-handler ::login-page login-page))]
       ["/login"                :post (conj common (async-handler ::login-submit login-submit))]
       ["/oauth/callback"       :get  (conj common (async-handler ::oauth-callback oauth-callback))]

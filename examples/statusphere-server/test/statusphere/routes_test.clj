@@ -6,10 +6,12 @@
             [io.pedestal.connector.test :as pt]
             [io.pedestal.http.jetty :as jetty]
             [atproto.client :as at]
+            [atproto.identity :as identity]
             [atproto.oauth.client :as oauth-client]
             [atproto.runtime.json :as json]
             [statusphere.auth :as auth]
             [statusphere.db :as db]
+            [statusphere.handles :as handles]
             [statusphere.routes :as routes]
             [statusphere.system :as system])
   (:import [java.net URLEncoder]
@@ -34,6 +36,7 @@
   (let [conn (db/connect (str "datomic:mem://" (gensym "routes-test")))]
     {:conn         conn
      :oauth-client (auth/client test-config conn)
+     :handles      (handles/resolver)
      :config       test-config}))
 
 ;; -----------------------------------------------------------------------------
@@ -139,7 +142,8 @@
         (is (some? cookie') "session cookie is re-issued with the DID (and a rotated CSRF token)")
         (testing "the session survives, and home renders signed-in"
           (with-redefs [oauth-client/restore (stub-async {:did "did:plc:alice" :handle "alice.test"})
-                        at/init              (stub-async {:stub-client true})]
+                        at/init              (stub-async {:stub-client true})
+                        at/query             (stub-async {:error "RecordNotFound"})]
             (let [{:keys [body]} (:response (browse connector "/" :cookie cookie'))]
               (is (str/includes? body "Log out"))
               (is (str/includes? body "alice.test"))
@@ -175,6 +179,93 @@
             (is (= 303 (:status response)))
             (let [{:keys [body]} (:response (browse connector "/" :cookie cookie''))]
               (is (str/includes? body "login-form") "signed out again"))))))))
+
+(defn- signed-in-cookie
+  "Full cookie dance: establish a signed-in browser session against stubs."
+  [connector]
+  (with-redefs [oauth-client/callback (stub-async {:session {:did "did:plc:alice"}})]
+    (let [{:keys [cookie]} (browse connector "/")]
+      (session-cookie (pt/response-for connector :get "/oauth/callback?code=c&state=s&iss=i"
+                                       :headers {"cookie" cookie})))))
+
+(def viewer-stubs
+  {#'oauth-client/restore (stub-async {:did "did:plc:alice" :handle "alice.test"})
+   #'at/init              (stub-async {:stub-client true})
+   #'at/query             (stub-async {:error "RecordNotFound"})})
+
+(deftest send-status-requires-login
+  (let [connector (test-connector (fresh-app))
+        session   (browse connector "/")]
+    (let [{:keys [status headers]} (post connector "/status" session {:status "🚀"})]
+      (is (= 303 status))
+      (is (= "/login" (get headers "Location"))))))
+
+(deftest send-status-writes-pds-then-index
+  (let [{:keys [conn] :as app} (fresh-app)
+        connector (test-connector app)
+        cookie    (signed-in-cookie connector)
+        put-args  (atom nil)]
+    (with-redefs-fn (assoc viewer-stubs
+                           #'at/procedure
+                           (fn [_client req & args]
+                             (reset! put-args req)
+                             (let [ch (second (drop-while #(not= :channel %) args))]
+                               (a/put! ch {:uri (str "at://did:plc:alice/xyz.statusphere.status/"
+                                                     (get-in req [:body :rkey]))})
+                               ch))
+                           #'identity/resolve-identity
+                           (stub-async {:did "did:plc:alice" :handle "alice.test"}))
+      (fn []
+        (let [session  (browse connector "/" :cookie cookie)
+              response (post connector "/status" session {:status "🚀"})]
+          (is (= 303 (:status response)))
+          (is (= "/" (get-in response [:headers "Location"])))
+          (testing "the PDS write is a validated putRecord with a TID rkey"
+            (is (= "com.atproto.repo.putRecord" (:nsid @put-args)))
+            (is (= false (get-in @put-args [:body :validate])))
+            (is (= 13 (count (get-in @put-args [:body :rkey]))))
+            (is (= "🚀" (get-in @put-args [:body :record :status]))))
+          (testing "the optimistic upsert landed in the local index"
+            (is (= "🚀" (:status/emoji (db/current-status (d/db conn) "did:plc:alice")))))
+          (testing "home shows it, with the resolved handle and marked picker"
+            (let [{:keys [body]} (:response (browse connector "/" :cookie cookie))]
+              (is (str/includes? body "@alice.test"))
+              (is (str/includes? body "status-option selected")))))))))
+
+(deftest send-status-rejects-invalid-statuses
+  (let [connector (test-connector (fresh-app))
+        cookie    (signed-in-cookie connector)]
+    (with-redefs-fn viewer-stubs
+      (fn []
+        (let [session (browse connector "/" :cookie cookie)]
+          (doseq [bad ["totally not an emoji" "🚀🚀" ""]]
+            (let [{:keys [status headers]} (post connector "/status" session {:status bad})]
+              (is (= 303 status))
+              (is (= "/?error=invalid-status" (get headers "Location"))
+                  (pr-str bad)))))))))
+
+(deftest send-status-surfaces-pds-failure
+  (let [connector (test-connector (fresh-app))
+        cookie    (signed-in-cookie connector)]
+    (with-redefs-fn (assoc viewer-stubs
+                           #'at/procedure (stub-async {:error "InternalServerError"}))
+      (fn []
+        (let [session (browse connector "/" :cookie cookie)
+              {:keys [status headers]} (post connector "/status" session {:status "🚀"})]
+          (is (= 303 status))
+          (is (= "/?error=pds" (get headers "Location"))))))))
+
+(deftest home-shows-profile-display-name
+  (let [connector (test-connector (fresh-app))
+        cookie    (signed-in-cookie connector)]
+    (with-redefs-fn (assoc viewer-stubs
+                           #'at/query
+                           (stub-async {:uri   "at://did:plc:alice/app.bsky.actor.profile/self"
+                                        :value {:$type       "app.bsky.actor.profile"
+                                                :displayName "Alice"}}))
+      (fn []
+        (let [{:keys [body]} (:response (browse connector "/" :cookie cookie))]
+          (is (str/includes? body "Hi, <strong>Alice</strong>")))))))
 
 (deftest client-metadata-is-served
   (let [{:keys [status body headers]} (pt/response-for (test-connector (fresh-app))

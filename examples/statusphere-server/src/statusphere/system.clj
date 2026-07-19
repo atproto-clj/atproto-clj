@@ -11,6 +11,7 @@
             [atproto.runtime.cast :as cast]
             [statusphere.auth :as auth]
             [statusphere.db :as db]
+            [statusphere.handles :as handles]
             [statusphere.routes :as routes]))
 
 (set! *warn-on-reflection* true)
@@ -42,16 +43,28 @@
     (assoc this :client nil)))
 
 ;; -----------------------------------------------------------------------------
+;; Handle resolver
+;; -----------------------------------------------------------------------------
+
+(defrecord HandleResolver [resolver]
+  component/Lifecycle
+  (start [this]
+    (if resolver this (assoc this :resolver (handles/resolver))))
+  (stop [this]
+    (assoc this :resolver nil)))
+
+;; -----------------------------------------------------------------------------
 ;; Web server
 ;; -----------------------------------------------------------------------------
 
-(defrecord WebServer [config datomic oauth-client connector]
+(defrecord WebServer [config datomic oauth-client handle-resolver connector]
   component/Lifecycle
   (start [this]
     (if connector
       this
       (let [app       {:conn         (:conn datomic)
                        :oauth-client (:client oauth-client)
+                       :handles      (:resolver handle-resolver)
                        :config       config}
             connector (-> (routes/connector-map config app)
                           (jetty/create-connector nil)
@@ -81,8 +94,9 @@
   [config]
   (register-lexicons!)
   (component/system-map
-   :datomic      (map->Datomic {:uri (:db-uri config)})
-   :oauth-client (component/using (map->OauthClient {:config config})
-                                  [:datomic])
-   :http         (component/using (map->WebServer {:config config})
-                                  [:datomic :oauth-client])))
+   :datomic         (map->Datomic {:uri (:db-uri config)})
+   :oauth-client    (component/using (map->OauthClient {:config config})
+                                     [:datomic])
+   :handle-resolver (map->HandleResolver {})
+   :http            (component/using (map->WebServer {:config config})
+                                     [:datomic :oauth-client :handle-resolver])))
