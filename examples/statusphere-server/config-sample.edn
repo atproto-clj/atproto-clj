@@ -1,0 +1,20 @@
+{;; The port the web server listens on.
+ :port 8080
+
+ ;; Datomic database URI.
+ ;; datomic:dev://  needs a local dev transactor running (see README).
+ ;; datomic:mem://statusphere works with zero setup for kicking the tires
+ ;; (nothing survives a restart).
+ :db-uri "datomic:dev://localhost:4334/statusphere"
+
+ ;; Secret used to encrypt the browser session cookie.
+ ;; Must be exactly 16 bytes, base64-encoded: openssl rand -base64 16
+ :cookie-secret ""
+
+ ;; Optional: the app's public HTTPS URL in production. When absent the app
+ ;; runs in loopback OAuth mode on http://127.0.0.1:<port> (see README).
+ ;; :public-url "https://statusphere.example.com"
+
+ ;; Optional: a different Jetstream instance to ingest from.
+ ;; :jetstream-host "jetstream2.us-west.bsky.network"
+ }

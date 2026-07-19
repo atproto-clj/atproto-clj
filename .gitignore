@@ -30,3 +30,5 @@ config.edn
 .env
 
 examples/statusphere/resources/public/js
+# examples/statusphere-server has a real dev/ source dir (reloaded workflow)
+!examples/statusphere-server/dev/

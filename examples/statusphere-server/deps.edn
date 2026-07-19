@@ -1,0 +1,20 @@
+{:paths ["src" "resources"]
+ :deps {org.clojure/clojure        {:mvn/version "1.12.0"}
+        org.clojure/core.async     {:mvn/version "1.8.711-beta1"} ;; used directly; matches the SDK's pin
+        atproto-clj/atproto-clj    {:local/root "../.."}
+        com.datomic/peer           {:mvn/version "1.0.7705"}
+        com.stuartsierra/component {:mvn/version "1.2.0"}
+        io.pedestal/pedestal.jetty {:mvn/version "0.8.1"}
+        hiccup/hiccup              {:mvn/version "2.0.0"}
+        org.slf4j/slf4j-simple     {:mvn/version "2.0.16"}}
+ :aliases
+ {;; clj -M:dev
+  :dev  {:extra-paths ["dev" "test"]
+         :extra-deps  {com.stuartsierra/component.repl {:mvn/version "1.0.0"}}
+         :jvm-opts    ["-Datproto.runtime.cast.dev-enabled=true"]}
+  ;; clj -M:run config.edn
+  :run  {:main-opts ["-m" "statusphere.main"]}
+  ;; clj -M:test
+  :test {:extra-paths ["test"]
+         :jvm-opts    ["-Dorg.slf4j.simpleLogger.defaultLogLevel=warn"]
+         :main-opts   ["-m" "statusphere.test-runner"]}}}
