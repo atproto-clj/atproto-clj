@@ -12,14 +12,19 @@ and lexicon validation (WS-09).
 ## Goal
 
 Rebuild the [Statusphere tutorial app](https://atproto.com/guides/statusphere-tutorial) —
-the canonical "my first atproto app" — as this repo's flagship consumer example, on this stack:
+the canonical "my first atproto app" — as this repo's *server-side* consumer example (a
+client-side example is planned separately, later), on this stack:
 
 1. **Clojure** only — no ClojureScript, no client build step.
 2. **Datomic Pro** on local dev storage as the app's read model / local index.
 3. **Sierra components** (`com.stuartsierra/component`) for system structure and lifecycle.
-4. **Pedestal** as the web server.
+4. **Pedestal 0.8** as the web server, used in
+   [async mode](https://pedestal.io/pedestal/0.8/guides/async.html).
 5. **Hiccup** for server-side rendering.
 6. **Zero client-side JavaScript** — plain HTML forms and the POST/redirect/GET pattern.
+7. **Async wherever possible** — the SDK is async-native, and request handling parks on
+   core.async channels instead of blocking threads; blocking is confined to threads the app
+   owns and to two documented sync islands.
 
 The emphasis is *simplicity and clear, well-factored code*: someone reading the example should
 come away understanding both "how do I build an atproto app" and "what does an idiomatically
@@ -50,20 +55,24 @@ app's own XRPC server (`atproto.xrpc.server` + `xyz.statusphere.api` handlers fo
 has no firehose ingester wired in (`examples/statusphere/README.md:9` — "not yet"; an
 `ingester.clj` exists but the main ns starts it while the README disclaims it).
 
-**This design replaces that implementation in place** at `examples/statusphere/`. Rationale:
+**This design does not touch that implementation.** The new app lives alongside it at
+`examples/statusphere-server/` as the *server-side* example — SSR, no client build, no
+self-hosted XRPC API. The existing `examples/statusphere` stays as-is and is the natural
+seed for a future *client-side* example (SPA + XRPC server; its own design doc, later).
 
-- The TypeScript reference app ([bluesky-social/statusphere-example-app](https://github.com/bluesky-social/statusphere-example-app))
-  is itself a server-rendered app with negligible client JS; the SPA + self-hosted XRPC API
-  was a divergence, and it roughly doubles the concept count of the example.
-- One canonical example beats two half-maintained ones. The XRPC *server* surface the old
-  example demonstrated is now exercised by the WS-08/WS-11 test suites; the cljs client story
-  belongs to WS-10, which is explicitly not started.
-- Kept from the old tree: `resources/public/style.css` (the TS app's stylesheet),
-  `resources/statusphere-lexicons/xyz/statusphere/status.json`, and the two `app.bsky.actor`
-  lexicons (needed to validate fetched profiles). Deleted: the query/procedure lexicons
-  (`getStatuses.json`, `sendStatus.json`, `getUser.json`, `defs.json`) — with no XRPC API
-  layer there is nothing to serve them; the cljs sources, cljsjs/reagent deps, SQLite, and
-  Ring/Compojure go too.
+Two consequences of living side by side:
+
+- **Distinct namespace root.** The new app uses `statusphere.*` (`statusphere.system`,
+  `statusphere.db`, …), not `xyz.statusphere.*` — two projects in one repo with identical
+  namespace names would confuse editors/clojure-lsp and anyone grepping. The lexicon NSIDs
+  are unaffected (they are data, not code).
+- **Copied, not shared, resources.** `resources/public/style.css` (the TS app's stylesheet),
+  `resources/statusphere-lexicons/xyz/statusphere/status.json`, and the two
+  `app.bsky.actor` lexicons (needed to validate fetched profiles) are copied from the
+  existing example. The query/procedure lexicons (`getStatuses.json`, `sendStatus.json`,
+  `getUser.json`, `defs.json`) are not copied — with no XRPC API layer there is nothing to
+  serve them. Drift between the copies is a non-risk: both sets mirror the upstream TS
+  reference, not each other.
 
 ## Reference implementation guide
 
@@ -73,9 +82,10 @@ has no firehose ingester wired in (`examples/statusphere/README.md:9` — "not y
   `src/auth/client.ts` (OAuth), `src/ingester.ts` (firehose → DB), `src/pages/*` (SSR views;
   copy `STATUS_OPTIONS` — the ~20-emoji picker vector — verbatim from `src/pages/home.ts`),
   `src/db.ts` (the two-table schema this design maps onto Datomic).
-- **The old Clojure example** (this repo, pre-rewrite): `xyz.statusphere.auth` is close to
-  what we want and carries over nearly unchanged; `xyz.statusphere.ingester`'s event loop is
-  the right shape but gains validation-mode binding, delete handling, and cursor persistence.
+- **The existing Clojure example** (this repo, `examples/statusphere`, untouched):
+  `xyz.statusphere.auth` is close to what we want and carries over nearly unchanged (modulo
+  the Datomic stores); `xyz.statusphere.ingester`'s event loop is the right shape but gains
+  validation-mode binding, delete handling, and cursor persistence.
 
 ## Functional spec
 
@@ -149,6 +159,12 @@ Five components. Factoring rules, applied uniformly:
   domain testable without starting anything.
 - **Views are pure**: data in, hiccup out. No I/O in `views.clj` — handlers resolve handles,
   fetch profiles, and query Datomic, then pass finished data to the view.
+- **Async by default.** Handlers are functions of `request → channel-of-response`;
+  interceptors park on channels rather than block; every SDK/Datomic bridge lives in
+  `statusphere.async` (see "Async model" below). Blocking code is allowed only on threads
+  the app owns (`a/thread`, the ingester's consumer thread) plus two documented sync
+  islands: peer-local Datomic reads (`d/db`/`d/q` — in-memory, small here) and the OAuth
+  `Store` protocol (synchronous by contract; see Auth).
 - **The system map is the only place wiring happens.** Nothing reaches into a global; the one
   deliberate exception is `lexicon/register-specs!` (a global, idempotent spec registry —
   called once in `system.clj` when constructing the system, and safe to re-run on every
@@ -157,28 +173,29 @@ Five components. Factoring rules, applied uniformly:
 ### Project layout
 
 ```
-examples/statusphere/
+examples/statusphere-server/
 ├── deps.edn
 ├── config-sample.edn              ;; cp to config.edn (gitignored)
 ├── README.md                      ;; incl. Datomic transactor setup
 ├── dev/user.clj                   ;; component.repl reloaded workflow
 ├── resources/
-│   ├── public/style.css           ;; kept from the TS app
+│   ├── public/style.css           ;; copied from examples/statusphere (the TS app's css)
 │   └── statusphere-lexicons/
 │       ├── xyz/statusphere/status.json
 │       └── app/bsky/actor/{profile,defs}.json
-└── src/xyz/statusphere/
+└── src/statusphere/
     ├── main.clj                   ;; -main: read config, start system, block
     ├── system.clj                 ;; system map + component defs (~all lifecycle code)
+    ├── async.clj                  ;; SDK/Datomic → core.async bridges (<call, <transact)
     ├── db.clj                     ;; Datomic schema (data), queries, tx builders
     ├── auth.clj                   ;; OAuth client construction + Datomic Store impls
     ├── ingester.clj               ;; jetstream event handling + cursor store
-    ├── handles.clj                ;; DID → handle resolution (cached)
+    ├── handles.clj                ;; DID → handle resolution (cached, async)
     ├── routes.clj                 ;; Pedestal routes, interceptors, handlers
     └── views.clj                  ;; hiccup pages (pure)
 ```
 
-Nine source files. `system.clj` owns *all* `component/Lifecycle` implementations (they are
+Ten source files. `system.clj` owns *all* `component/Lifecycle` implementations (they are
 each a handful of lines once the logic lives elsewhere); the other namespaces export plain
 functions. This keeps "what starts and stops, in what order" readable in one place.
 
@@ -187,17 +204,18 @@ functions. This keeps "what starts and stops, in what order" readable in one pla
 ```clojure
 {:paths ["src" "resources"]
  :deps {org.clojure/clojure         {:mvn/version "1.12.0"}
+        org.clojure/core.async      {:mvn/version "1.8.711-beta1"} ;; used directly; match the SDK's pin
         atproto-clj/atproto-clj     {:local/root "../.."}
         com.datomic/peer            {:mvn/version "1.0.7387"}
         com.stuartsierra/component  {:mvn/version "1.1.0"}
-        io.pedestal/pedestal.jetty  {:mvn/version "0.7.2"}
+        io.pedestal/pedestal.jetty  {:mvn/version "0.8.0"}
         hiccup/hiccup               {:mvn/version "2.0.0"}
         org.slf4j/slf4j-simple      {:mvn/version "2.0.16"}}
  :aliases
  {:dev  {:extra-paths ["dev" "test"]
          :extra-deps  {com.stuartsierra/component.repl {:mvn/version "0.2.0"}}
          :jvm-opts    ["-Datproto.runtime.cast.dev-enabled=true"]}
-  :run  {:main-opts ["-m" "xyz.statusphere.main"]}
+  :run  {:main-opts ["-m" "statusphere.main"]}
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner
                        {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
@@ -206,8 +224,41 @@ functions. This keeps "what starts and stops, in what order" readable in one pla
 
 Pin all versions to current at implementation time (`com.datomic/peer` tracks the Datomic
 release train — 1.0.7387 was current at design time; anything ≥ 1.0.6735 is license-free).
-Datomic Pro's peer library is on Maven Central and needs no license key. `io.pedestal/pedestal.jetty`
-pulls in `pedestal.service`; Hiccup 2 is required (auto-escaping via `hiccup2.core/html`).
+Datomic Pro's peer library is on Maven Central and needs no license key. Pedestal **0.8** is
+required — its async interceptor support is the model this design follows; Hiccup 2 is
+required (auto-escaping via `hiccup2.core/html`).
+
+### Async model
+
+One tiny namespace, `statusphere.async`, owns every bridge between the app's three async
+worlds — the SDK's callback convention, Datomic's futures, and core.async:
+
+```clojure
+(defn <call
+  "Invoke an SDK async fn with a fresh promise-chan as its :channel option and
+   return that channel: (<call oauth-client/authorize client handle)."
+  [f & args]
+  (let [ch (a/promise-chan)]
+    (apply f (concat args [:channel ch]))
+    ch))
+
+(defn <transact
+  "d/transact-async bridged to core.async: a channel delivering the tx result
+   (or {:error ...}). The deref of Datomic's future happens on an a/thread, so
+   no shared thread ever parks on it."
+  [conn tx-data] ...)
+```
+
+Everything downstream is uniform: awaiting an SDK call or a Datomic write is
+`(a/<! (<call ...))` / `(a/<! (<transact ...))` inside a `go` block.
+
+Pedestal's async contract (per the
+[0.8 async guide](https://pedestal.io/pedestal/0.8/guides/async.html)): an interceptor that
+returns a channel from `:enter`/`:leave` parks the chain, and the channel must deliver the
+updated context map (one value). The operational constraint that shapes the rules above:
+once a chain has gone async, subsequent interceptors run on the core.async dispatch pool
+(default 8 threads) — one blocking call there degrades the whole server, which is why
+blocking primitives are confined to `async.clj` internals and app-owned threads.
 
 ## Datomic design
 
@@ -305,6 +356,12 @@ Built in the `:http` component's `start` from config + started dependencies:
  ::http/secure-headers {...}}   ;; defaults, minus CSP strictness if it fights inline css
 ```
 
+(Sketched with the classic `io.pedestal.http` service-map keys. Pedestal 0.8 also offers the
+newer `io.pedestal.connector` API — which to use is decided at M2 and does not affect this
+design: the interceptor/async semantics are identical, and under the connector API the
+session/CSRF/resource interceptors are simply added explicitly from
+`io.pedestal.http.ring-middlewares`.)
+
 - **Browser session**: Ring cookie-store (encrypted, `:cookie-secret` = 16 bytes, base64 in
   config, `openssl rand -base64 16`), holding only `{:did "did:..."}`. `SameSite=Lax` is
   load-bearing: the OAuth callback is a top-level GET navigation, so the cookie is sent and
@@ -328,6 +385,7 @@ Two app interceptors, defined in `routes.clj`, closed over the started component
 (def restore-viewer
   "When the browser session carries a :did, restore the OAuth session and
    attach :viewer {:did .. :client <atproto client>} to the request.
+   Async: :enter returns a go block awaiting (<call oauth-client/restore ...).
    On SessionNotFound / refresh failure: log via cast, clear the browser
    session (expired cookie in the response), continue logged-out."
   ...)
@@ -341,32 +399,41 @@ body-params, session, CSRF — from the service map). `restore-viewer` calls
 
 ### Handlers
 
-Thin: pull what they need off the request, call `db.clj` / SDK fns, pass data to a view or
-redirect. The SDK's async fns are simply deref'd (`@(oauth-client/authorize ...)`) — a
-request-handling thread is exactly the place to block, and it keeps handlers linear. Sketch
-of the interesting one:
+Thin: pull what they need off the request, await `db.clj` / SDK calls, pass data to a view
+or redirect. Handlers are functions of `request → channel-of-response`, written as `go`
+blocks; a ~5-line `async-handler` adapter turns one into a Pedestal interceptor whose
+`:enter` returns a channel delivering `(assoc context :response ...)`. Two rules keep this
+honest:
+
+- Await SDK calls with `(a/<! (<call f ...))` — never deref inside a `go`.
+- Datomic writes go through `(a/<! (<transact conn tx)))`; any other blocking work hops
+  through `a/thread` the same way. (Peer-local reads — `d/db`, the small `d/q`s in
+  `db.clj` — stay inline; they don't do I/O.)
+
+Sketch of the interesting one:
 
 ```clojure
 (defn send-status
   [{:keys [app viewer form-params] :as req}]
-  (let [emoji  (:status form-params)
-        record {:$type     "xyz.statusphere.status"
-                :status    emoji
-                :createdAt (str (Instant/now))}]
-    (if-not (binding [lexicon/*schema-validate* true]
-              (s/valid? ::lexicon/record record))
-      (redirect "/?error=invalid-status")
-      (let [{:keys [error uri]} @(at/procedure (:client viewer)
-                                   {:nsid "com.atproto.repo.putRecord"
-                                    :body {:repo       (:did viewer)
-                                           :collection "xyz.statusphere.status"
-                                           :rkey       (tid/next-tid)
-                                           :record     record
-                                           :validate   false}})] ;; PDS doesn't know our lexicon
-        (if error
-          (do (cast/alert ...) (redirect "/?error=pds"))
-          (do (d/transact conn (db/upsert-status-tx (optimistic uri viewer record)))
-              (redirect "/")))))))
+  (a/go
+    (let [emoji  (:status form-params)
+          record {:$type     "xyz.statusphere.status"
+                  :status    emoji
+                  :createdAt (str (Instant/now))}]
+      (if-not (binding [lexicon/*schema-validate* true]   ;; sync validation — no park inside the binding
+                (s/valid? ::lexicon/record record))
+        (redirect "/?error=invalid-status")
+        (let [{:keys [error uri]} (a/<! (<call at/procedure (:client viewer)
+                                          {:nsid "com.atproto.repo.putRecord"
+                                           :body {:repo       (:did viewer)
+                                                  :collection "xyz.statusphere.status"
+                                                  :rkey       (tid/next-tid)
+                                                  :record     record
+                                                  :validate   false}}))] ;; PDS doesn't know our lexicon
+          (if error
+            (do (cast/alert ...) (redirect "/?error=pds"))
+            (do (a/<! (<transact conn (db/upsert-status-tx (optimistic uri viewer record))))
+                (redirect "/"))))))))
 ```
 
 Note the `binding` of `lexicon/*schema-validate*`: it defaults to `false` (data-shape check
@@ -374,10 +441,11 @@ only); the app binds it true at its two validation sites (here and the ingester)
 are checked against the actual `xyz.statusphere.status` schema — including `maxGraphemes 1`,
 which is the server-side guard that the posted form value really is a single emoji.
 
-The home handler composes: `db/recent-statuses` → `handles/resolve-all` (distinct author
-DIDs → handle map) → for a viewer, `db/current-status` + a best-effort profile fetch
-(`com.atproto.repo.getRecord` on `app.bsky.actor.profile/self`, validated against the
-bundled lexicon, falling back to the handle on any failure) → `views/home`.
+The home handler composes, in one `go` block: `db/recent-statuses` →
+`(a/<! (handles/<resolve-all ...))` (distinct author DIDs → handle map) → for a viewer,
+`db/current-status` + a best-effort profile fetch (`com.atproto.repo.getRecord` on
+`app.bsky.actor.profile/self` via `<call`, validated against the bundled lexicon, falling
+back to the handle on any failure) → `views/home`.
 
 ### Views
 
@@ -398,8 +466,11 @@ Carries over the old example's shape, retargeted at Datomic:
   `<public-url>/client-metadata.json`, served by the route of the same name.
 - `state-store` / `session-store`: ~10-line `reify` of `atproto.oauth.client.store/Store`
   over the `:auth-state/*` / `:auth-session/*` attributes (values are JSON strings, opaque).
-  Synchronous per the protocol; `d/transact` derefs inline. Per the protocol docstring's
-  growth note, `state-store`'s `set*` also lazily sweeps expired state entries (a
+  This is one of the design's two deliberate sync islands: the `Store` protocol is
+  synchronous by contract, and its callers are SDK internals on their own callback threads —
+  never the go-dispatch pool — so the inline `d/transact` deref here is cheap and safe.
+  Per the protocol docstring's growth note, `state-store`'s `set*` also lazily sweeps
+  expired state entries (a
   `d/q` for entities whose JSON `:expires-at` has passed — cheap at this scale, or simply
   entries older than an hour by `:db/txInstant`).
 
@@ -427,10 +498,10 @@ socket:
 ```
 
 The `:ingester` component's `start`: an events chan, `(jet/consume ch :typed? true
-:wanted-collections ["xyz.statusphere.status"] :cursor-store store)`, and a `go-loop` (with
-the transact hop through `a/thread` or a blocking loop on a dedicated thread — `d/transact`
-must not block a go thread) draining events through `handle-event!`. `stop`: close the
-control channel. Reconnection, backoff, and cursor resume are the SDK's job
+:wanted-collections ["xyz.statusphere.status"] :cursor-store store)`, and a consumer loop
+on `a/thread` draining events through `handle-event!` — a dedicated thread the app owns, so
+the loop stays plain blocking code (`a/<!!`, synchronous transacts) and never touches the
+go-dispatch pool. `stop`: close the control channel. Reconnection, backoff, and cursor resume are the SDK's job
 (`atproto.runtime.ws`), not the app's.
 
 **Cursor store**: `cursor.clj`-style reify over `:cursor/*` in `db.clj`, wrapped in a small
@@ -450,13 +521,15 @@ transact) is noted in Risks and not built.
 (defn resolver []                ;; held by the :handle-resolver component
   {:cache (identity-cache/memory-cache)})
 
-(defn did->handle [resolver did] ...)   ;; resolve-identity w/ :cache; fall back to did
-(defn resolve-all [resolver dids] ...)  ;; distinct dids → {did handle}, sequential+cached
+(defn <did->handle [resolver did] ...)  ;; channel of handle; resolve-identity w/ :cache, fall back to did
+(defn <resolve-all [resolver dids] ...) ;; channel of {did handle}: go block, sequential a/<! per distinct did
 ```
 
-Uses the SDK's stale-while-revalidate cache (`atproto.identity.cache/default-policy`), so a
-page render costs at most one live resolution per never-seen DID, and repeat renders are
-cache hits. Views receive the finished `{did handle}` map. Durable (Datomic-backed) handle
+Both return channels — resolution is an SDK async call (`<call identity/resolve-identity
+... :cache cache`), so no thread parks on DNS/HTTP. The SDK's stale-while-revalidate cache
+(`atproto.identity.cache/default-policy`) means a page render costs at most one live
+resolution per never-seen DID, and repeat renders are cache hits. Views receive the
+finished `{did handle}` map. Durable (Datomic-backed) handle
 caching and opportunistic refresh from Jetstream `:identity` events are explicitly *not*
 built — see Risks.
 
@@ -487,8 +560,8 @@ the SDK does.
 `com.stuartsierra/component.repl`: `(set-init (fn [_] (system/new-system (config/load))))`,
 then `(reset)` / `(stop)` / `system` at the REPL — code reload via tools.namespace comes with
 it. Because `lexicon/register-specs!` is idempotent and runs in `system/new-system`, `(reset)`
-re-registers cleanly. The README shows the three-line REPL session. This replaces the old
-example's bespoke `start-dev`/`stop-dev`/`restart-dev` atoms.
+re-registers cleanly. The README shows the three-line REPL session — a deliberate contrast
+with the existing example's bespoke `start-dev`/`stop-dev`/`restart-dev` atoms.
 
 ## Test plan
 
@@ -503,14 +576,17 @@ All tests run against `datomic:mem://test-<gensym>` — no transactor, no networ
   schema-invalid record is skipped (with `*schema-validate*` genuinely catching e.g. a
   two-grapheme status), delete retracts, unknown kinds/collections are no-ops. Cursor store
   round-trips; throttled store coalesces writes (injected clock).
-- **`routes-test`**: `io.pedestal.test/response-for` against the service fn with a real mem
-  Datomic conn and a stubbed viewer/oauth boundary (the interceptors take the app context as
-  data, so tests pass a fake `:oauth-client` map and pre-baked `:viewer`): home renders
-  statuses + escapes hostile handles; `POST /status` without viewer redirects to `/login`;
-  with viewer and a stubbed client, transacts the optimistic status; CSRF-less POST is
-  rejected.
+- **`routes-test`**: `io.pedestal.test/response-for` against the service fn (it drives
+  async interceptor chains transparently) with a real mem Datomic conn and a stubbed
+  viewer/oauth boundary (the interceptors take the app context as data, so tests pass a
+  fake `:oauth-client` map and pre-baked `:viewer`): home renders statuses + escapes
+  hostile handles; `POST /status` without viewer redirects to `/login`; with viewer and a
+  stubbed client, transacts the optimistic status; CSRF-less POST is rejected. Handler fns
+  are also directly testable without Pedestal: call with a request map, `a/<!!` the
+  returned channel.
 - **`views-test`**: pure hiccup fns — smoke render + escaping of untrusted strings.
-- **Live verification (manual, not CI)**: full OAuth login against a real account on
+- **Live verification (manual, optional — the unit tests above are the acceptance bar; per
+  project decision, offline/e2e automation is a non-goal)**: full OAuth login against a real account on
   bsky.social, status post visible in the PDS via `com.atproto.repo.listRecords`, second
   browser sees it arrive via Jetstream within seconds, restart resumes from the cursor.
 
@@ -527,17 +603,23 @@ All tests run against `datomic:mem://test-<gensym>` — no transactor, no networ
       strings HTML-escaped.
 - [ ] No component reaches into another's internals; `db.clj`, `views.clj`, `handles.clj`,
       `ingester/handle-event!` all callable from a bare REPL with no system running.
-- [ ] Old-stack files (cljs, SQLite, Compojure, API lexicons) are gone; README rewritten.
+- [ ] No blocking on go-dispatch/interceptor threads: SDK calls and Datomic writes are
+      awaited via channels (`<call`/`<transact`); blocking code lives only on `a/thread`s
+      the app owns and in the documented sync islands.
+- [ ] The existing `examples/statusphere` is untouched; the new app is fully self-contained
+      under `examples/statusphere-server/` with `statusphere.*` namespaces.
 
 ## Milestones
 
 Small PRs against `main`, each independently green, in order:
 
-1. **M1 — skeleton + Datomic**: new deps.edn, `db.clj` (schema/queries/txs), `system.clj`
-   with `:datomic` only, `main.clj`, `user.clj`, `db-test`. Old cljs/SQLite files deleted
-   here so the tree never carries both stacks.
-2. **M2 — web shell**: `:http` component, routes/views for a logged-out home + static css,
-   `views-test`, `routes-test` happy path. App browsable with seed data.
+1. **M1 — skeleton + Datomic**: new `examples/statusphere-server/` project (deps.edn,
+   `db.clj` schema/queries/txs, `system.clj` with `:datomic` only, `main.clj`, `user.clj`,
+   `db-test`); copies `style.css` and the three needed lexicon JSONs from
+   `examples/statusphere`, which is not modified.
+2. **M2 — web shell**: `async.clj` + the `async-handler` adapter, `:http` component
+   (service-map vs `io.pedestal.connector` decided here), routes/views for a logged-out
+   home + static css, `views-test`, `routes-test` happy path. App browsable with seed data.
 3. **M3 — OAuth**: `auth.clj` + stores, login/callback/logout routes, `restore-viewer`,
    client-metadata route, `auth-test`. Live login verified manually.
 4. **M4 — status writes**: `POST /status`, lexicon registration + validation, optimistic
@@ -545,13 +627,16 @@ Small PRs against `main`, each independently green, in order:
 5. **M5 — ingester**: `ingester.clj`, cursor store + throttle, `:ingester` component,
    `ingester-test`. Live firehose verified manually.
 6. **M6 — polish**: README (transactor setup, REPL workflow, deploy note), config spec
-   error messages, top-level `README.md` example pointer refreshed.
+   error messages, top-level `README.md` refreshed to point at both examples (server-side:
+   this app; SPA: `examples/statusphere`).
 
 ## Risks & open questions
 
-1. **Replacing the old example loses the cljs/XRPC-server demo.** Accepted above (M1 deletes
-   it); if the orchestrator wants it kept, resurrect it as `examples/statusphere-spa/` from
-   git history when WS-10 lands — do not maintain both meanwhile.
+1. **Two Statusphere examples in-tree.** Resolved by decision: the existing SPA example
+   stays untouched and this app lives beside it as the server-side example; a client-side
+   example (likely evolving the existing one) is future work with its own design doc. The
+   copied css/lexicon files mirror the upstream TS reference, so drift between the copies
+   has no correctness impact.
 2. **Datomic transactor is a heavier prerequisite than SQLite** for a first-run example.
    Mitigated: `datomic:mem://` works with zero setup for kicking the tires and for all tests;
    the README leads with the two-command transactor setup. Peer lib is license-free.
@@ -565,9 +650,14 @@ Small PRs against `main`, each independently green, in order:
    within its TTL window. Fine for an example. Possible follow-ups (not designed): Datomic-
    backed `identity.cache/Cache` impl; feeding Jetstream `:identity` events for *known* DIDs
    into the cache.
-6. **Version pins** (Datomic peer, Pedestal 0.7.x vs 0.8, Hiccup 2.x): re-check latest at M1
-   and pin in deps.edn; nothing in the design depends on version specifics beyond Hiccup 2's
-   auto-escaping and Pedestal's table routes + `::http/enable-csrf`.
-7. **Deref-blocking in handlers** assumes a thread-per-request server (Jetty). True today;
-   if Pedestal's default interceptor executor ever changes that assumption, revisit — but do
-   not preemptively async-ify the handlers.
+6. **Version pins** (Datomic peer, Pedestal 0.8.x, Hiccup 2.x): re-check latest at M1 and
+   pin in deps.edn. Pedestal 0.8 is required (its async interceptor support is the model
+   followed here); the open sub-choice is the classic `io.pedestal.http` service map vs the
+   0.8 `io.pedestal.connector` API — decided at M2, with no impact on the rest of the
+   design (the interceptor contract is identical in both).
+7. **Async's failure mode is a stealthy block.** After the first async interceptor the rest
+   of the chain runs on the core.async dispatch pool (default 8 threads); one forgotten
+   blocking call — a bare `d/transact`, a deref — can jam every request under load, and it
+   works fine in light testing. Mitigations: all bridging is funneled through `async.clj`
+   (`<call`/`<transact`) so blocking primitives never appear in `routes.clj`/`handles.clj`,
+   and the M2–M5 review checklist includes grepping handlers for `@`/`deref`/`<!!`.
