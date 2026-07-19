@@ -1,6 +1,9 @@
 # 12: Statusphere Example App — Datomic + Component + Pedestal + Hiccup (SSR)
 
-**Status: design — not started.**
+**Status: implemented** — the app lives at `examples/statusphere-server/`; milestones M1–M6
+merged on `claude/statusphere-app-design-lgk0fe`. Unit suite green (`clojure -M:test`,
+datomic:mem, no network). Live OAuth/Jetstream verification is still pending — the
+implementation environment had no route to PDSes or Jetstream; see Acceptance criteria.
 
 This doc sits *outside* the WS-01…11 parity plan ([00-overview.md](00-overview.md) remains
 authoritative only for those workstreams). It designs an application that *consumes* the SDK's
@@ -195,7 +198,7 @@ examples/statusphere-server/
     └── views.clj                  ;; hiccup pages (pure)
 ```
 
-Nine source files. `system.clj` owns *all* `component/Lifecycle` implementations (they are
+Eight source files. `system.clj` owns *all* `component/Lifecycle` implementations (they are
 each a handful of lines once the logic lives elsewhere); the other namespaces export plain
 functions. This keeps "what starts and stops, in what order" readable in one place.
 
@@ -206,27 +209,27 @@ functions. This keeps "what starts and stops, in what order" readable in one pla
  :deps {org.clojure/clojure         {:mvn/version "1.12.0"}
         org.clojure/core.async      {:mvn/version "1.8.711-beta1"} ;; used directly; match the SDK's pin
         atproto-clj/atproto-clj     {:local/root "../.."}
-        com.datomic/peer            {:mvn/version "1.0.7387"}
-        com.stuartsierra/component  {:mvn/version "1.1.0"}
-        io.pedestal/pedestal.jetty  {:mvn/version "0.8.0"}
+        com.datomic/peer            {:mvn/version "1.0.7705"}
+        com.stuartsierra/component  {:mvn/version "1.2.0"}
+        io.pedestal/pedestal.jetty  {:mvn/version "0.8.1"}
         hiccup/hiccup               {:mvn/version "2.0.0"}
         org.slf4j/slf4j-simple      {:mvn/version "2.0.16"}}
  :aliases
  {:dev  {:extra-paths ["dev" "test"]
-         :extra-deps  {com.stuartsierra/component.repl {:mvn/version "0.2.0"}}
+         :extra-deps  {com.stuartsierra/component.repl {:mvn/version "1.0.0"}}
          :jvm-opts    ["-Datproto.runtime.cast.dev-enabled=true"]}
   :run  {:main-opts ["-m" "statusphere.main"]}
   :test {:extra-paths ["test"]
-         :extra-deps  {io.github.cognitect-labs/test-runner
-                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
-         :main-opts   ["-m" "cognitect.test-runner"]}}}
+         :main-opts   ["-m" "statusphere.test-runner"]}}}
 ```
 
-Pin all versions to current at implementation time (`com.datomic/peer` tracks the Datomic
-release train — 1.0.7387 was current at design time; anything ≥ 1.0.6735 is license-free).
-Datomic Pro's peer library is on Maven Central and needs no license key. Pedestal **0.8** is
-required — its async interceptor support is the model this design follows; Hiccup 2 is
-required (auto-escaping via `hiccup2.core/html`).
+Versions are the pins actually used at implementation (`com.datomic/peer` tracks the
+Datomic release train; anything ≥ 1.0.6735 is license-free, on Maven Central, no key).
+Pedestal **0.8** is required — its async interceptor support is the model this design
+follows; Hiccup 2 is required (auto-escaping via `hiccup2.core/html`). One deviation from
+the original draft: instead of the cognitect test-runner (a git dep), tests run through a
+~10-line `statusphere.test-runner` namespace — one fewer tool in an example that is meant
+to be read.
 
 ### Async model
 
@@ -593,27 +596,35 @@ All tests run against `datomic:mem://test-<gensym>` — no transactor, no networ
 
 ## Acceptance criteria
 
-- [ ] `clojure -M:test` green with no transactor or network available.
+- [x] `clojure -M:test` green with no transactor or network available.
+      (35 tests / 110 assertions on datomic:mem.)
 - [ ] `clojure -M:run` against a local dev transactor serves the full flow: login with a
       real atproto handle → set status → status appears on `/` → logout.
+      *(Pending live verification — the implementation environment had no route to PDSes.
+      The flow is covered end-to-end in routes-test with the SDK stubbed at the fn
+      boundary, including the CSRF/session round trips.)*
 - [ ] Statuses posted by *other* accounts (e.g. from the TS reference app) appear in the
       feed via Jetstream without a restart; deletes disappear from the feed.
+      *(Pending live verification; `handle-event!` covered by unit tests, and the full
+      system starts/serves/stops cleanly with Jetstream unreachable.)*
 - [ ] Restarting the app neither drops nor re-processes-visibly the stream (cursor resume);
       restart with a wiped Datomic db rebuilds a working (forward-only) index.
-- [ ] Zero JavaScript served; every page functional with forms alone; all user-originated
-      strings HTML-escaped.
-- [ ] No component reaches into another's internals; `db.clj`, `views.clj`, `handles.clj`,
+      *(Pending live verification; cursor stores covered by unit tests.)*
+- [x] Zero JavaScript served; every page functional with forms alone; all user-originated
+      strings HTML-escaped (escaping asserted for statuses, handles, and error codes).
+- [x] No component reaches into another's internals; `db.clj`, `views.clj`, `handles.clj`,
       `ingester/handle-event!` all callable from a bare REPL with no system running.
-- [ ] No blocking on go-dispatch/interceptor threads: SDK calls awaited via
+- [x] No blocking on go-dispatch/interceptor threads: SDK calls awaited via
       `:channel (a/promise-chan)`, Datomic writes via `a/io-thread` + `d/transact`;
       blocking code lives only on `a/io-thread` bodies, threads the app owns, and the
       documented sync islands.
-- [ ] The existing `examples/statusphere` is untouched; the new app is fully self-contained
+- [x] The existing `examples/statusphere` is untouched; the new app is fully self-contained
       under `examples/statusphere-server/` with `statusphere.*` namespaces.
 
 ## Milestones
 
-Small PRs against `main`, each independently green, in order:
+Small PRs against `main`, each independently green, in order. **All six landed** (one
+commit per milestone on `claude/statusphere-app-design-lgk0fe`):
 
 1. **M1 — skeleton + Datomic**: new `examples/statusphere-server/` project (deps.edn,
    `db.clj` schema/queries/txs, `system.clj` with `:datomic` only, `main.clj`, `user.clj`,

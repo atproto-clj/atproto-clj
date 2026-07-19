@@ -126,7 +126,11 @@ The Jetstream implementation is currently only supported for JVM Clojure.
 (a/close! control-ch)
 ```
 
-See the [examples](/examples) directory for more examples.
+See the [examples](/examples) directory for more examples — including two builds
+of the [Statusphere tutorial app](https://atproto.com/guides/statusphere-tutorial):
+[`examples/statusphere-server`](/examples/statusphere-server) (server-side rendering:
+Datomic, component, Pedestal, Hiccup, OAuth + Jetstream) and
+[`examples/statusphere`](/examples/statusphere) (SPA + XRPC server).
 
 ## SDK Organization
 
